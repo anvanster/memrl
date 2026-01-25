@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::{Context, Result};
 use chrono::Utc;
 use git2::Repository;
@@ -59,7 +60,10 @@ pub async fn run(
                 episode.intent.task_type = analysis.task_type;
                 episode.intent.domain = analysis.tags;
                 if !analysis.files_modified.is_empty() {
-                    episode.context.files_modified.extend(analysis.files_modified);
+                    episode
+                        .context
+                        .files_modified
+                        .extend(analysis.files_modified);
                     episode.context.files_modified.sort();
                     episode.context.files_modified.dedup();
                 }
@@ -518,10 +522,7 @@ mod tests {
 
     #[test]
     fn test_determine_outcome() {
-        assert_eq!(
-            determine_outcome("All tests pass!"),
-            OutcomeStatus::Success
-        );
+        assert_eq!(determine_outcome("All tests pass!"), OutcomeStatus::Success);
         assert_eq!(
             determine_outcome("Build failed with errors"),
             OutcomeStatus::Failure

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -140,7 +141,12 @@ impl EpisodeStore {
                 // Filter by tag
                 if let Some(t) = tag {
                     let t_lower = t.to_lowercase();
-                    if !ep.intent.domain.iter().any(|d| d.to_lowercase().contains(&t_lower)) {
+                    if !ep
+                        .intent
+                        .domain
+                        .iter()
+                        .any(|d| d.to_lowercase().contains(&t_lower))
+                    {
                         return false;
                     }
                 }
@@ -253,7 +259,11 @@ impl EpisodeStore {
         let total_helpful: u32 = filtered.iter().map(|e| e.utility.helpful_count).sum();
 
         let avg_utility = if total > 0 {
-            filtered.iter().map(|e| e.utility.calculate_score()).sum::<f32>() / total as f32
+            filtered
+                .iter()
+                .map(|e| e.utility.calculate_score())
+                .sum::<f32>()
+                / total as f32
         } else {
             0.0
         };

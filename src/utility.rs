@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use std::collections::HashMap;
@@ -177,7 +179,10 @@ async fn run_bellman_propagation(
         return Ok((0, 0.0));
     }
 
-    println!("    Found {} high-utility episodes to propagate from", helpful_episodes.len());
+    println!(
+        "    Found {} high-utility episodes to propagate from",
+        helpful_episodes.len()
+    );
 
     // For each helpful episode, find similar episodes and propagate utility
     for source in &helpful_episodes {
@@ -210,9 +215,9 @@ async fn run_bellman_propagation(
 
                 // Bellman update: Q(s) = Q(s) + α * (γ * Q(s') - Q(s))
                 // Where s' is the similar helpful episode
-                let td_error = params.discount_factor * source_score as f64
-                    * result.similarity_score as f64
-                    - old_score as f64;
+                let td_error =
+                    params.discount_factor * source_score as f64 * result.similarity_score as f64
+                        - old_score as f64;
                 let new_score = old_score + (params.learning_rate * td_error) as f32;
                 let new_score = new_score.clamp(0.0, 1.0);
 
@@ -241,10 +246,7 @@ fn run_tag_propagation(
 
     for ep in episodes {
         for tag in &ep.intent.domain {
-            tag_episodes
-                .entry(tag.to_lowercase())
-                .or_default()
-                .push(ep);
+            tag_episodes.entry(tag.to_lowercase()).or_default().push(ep);
         }
         // Also use task type as implicit tag
         tag_episodes
@@ -266,7 +268,8 @@ fn run_tag_propagation(
         let avg_utility: f32 = group
             .iter()
             .map(|ep| ep.utility.calculate_score())
-            .sum::<f32>() / group.len() as f32;
+            .sum::<f32>()
+            / group.len() as f32;
 
         // Propagate from above-average to below-average
         for ep in group {
@@ -296,7 +299,10 @@ fn run_tag_propagation(
 fn save_utility_updates(store: &EpisodeStore) -> Result<usize> {
     // Updates are saved incrementally, so just return count
     let episodes = store.list_all()?;
-    Ok(episodes.iter().filter(|ep| ep.utility.score.is_some()).count())
+    Ok(episodes
+        .iter()
+        .filter(|ep| ep.utility.score.is_some())
+        .count())
 }
 
 /// Sync utility scores to the vector index
@@ -311,7 +317,10 @@ async fn sync_utility_to_index() -> Result<()> {
     let episodes = store.list_all()?;
 
     for ep in episodes {
-        let score = ep.utility.score.unwrap_or_else(|| ep.utility.calculate_score());
+        let score = ep
+            .utility
+            .score
+            .unwrap_or_else(|| ep.utility.calculate_score());
         indexer.update_utility(&ep.id, score).await?;
     }
 
@@ -349,7 +358,10 @@ pub fn prune_episodes(
 
         // Check utility
         if let Some(min_util) = min_utility {
-            let utility = ep.utility.score.unwrap_or_else(|| ep.utility.calculate_score());
+            let utility = ep
+                .utility
+                .score
+                .unwrap_or_else(|| ep.utility.calculate_score());
             if utility < min_util {
                 should_prune = true;
                 reasons.push(format!("utility: {:.0}%", utility * 100.0));
@@ -442,7 +454,11 @@ pub fn temporal_credit_assignment(
 
                 // Check if related (same project, similar tags)
                 let related = prev.project == current.project
-                    || prev.intent.domain.iter().any(|t| current.intent.domain.contains(t));
+                    || prev
+                        .intent
+                        .domain
+                        .iter()
+                        .any(|t| current.intent.domain.contains(t));
 
                 if related {
                     let mut prev_updated = prev.clone();

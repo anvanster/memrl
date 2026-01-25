@@ -1,14 +1,16 @@
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, Float32Array, Int32Array, Int64Array, RecordBatch, RecordBatchIterator,
     StringArray,
 };
 use arrow_schema::{DataType, Field, Schema};
-use lance_arrow::FixedSizeListArrayExt;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use futures::TryStreamExt;
+use lance_arrow::FixedSizeListArrayExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
-use lancedb::{connect, Connection, Table};
+use lancedb::{Connection, Table, connect};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,7 +53,11 @@ impl EpisodeIndexer {
             Err(_) => None, // Table doesn't exist yet
         };
 
-        Ok(Self { db, table, embedder })
+        Ok(Self {
+            db,
+            table,
+            embedder,
+        })
     }
 
     /// Get the LanceDB database path
@@ -153,15 +159,17 @@ impl EpisodeIndexer {
 
         let id_array = Arc::new(StringArray::from(vec![episode.id.clone()])) as ArrayRef;
         let project_array = Arc::new(StringArray::from(vec![episode.project.clone()])) as ArrayRef;
-        let task_type_array =
-            Arc::new(StringArray::from(vec![episode.intent.task_type.to_string()])) as ArrayRef;
+        let task_type_array = Arc::new(StringArray::from(vec![
+            episode.intent.task_type.to_string(),
+        ])) as ArrayRef;
         let intent_text_array = Arc::new(StringArray::from(vec![embedding_text])) as ArrayRef;
         let timestamp_array =
             Arc::new(Int64Array::from(vec![episode.timestamp_start.timestamp()])) as ArrayRef;
         let utility_score_array =
             Arc::new(Float32Array::from(vec![episode.utility.calculate_score()])) as ArrayRef;
-        let retrieval_count_array =
-            Arc::new(Int32Array::from(vec![episode.utility.retrieval_count as i32])) as ArrayRef;
+        let retrieval_count_array = Arc::new(Int32Array::from(vec![
+            episode.utility.retrieval_count as i32,
+        ])) as ArrayRef;
         let helpful_count_array =
             Arc::new(Int32Array::from(vec![episode.utility.helpful_count as i32])) as ArrayRef;
 

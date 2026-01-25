@@ -1,3 +1,13 @@
+// Allow common clippy warnings for prototype code
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::single_char_add_str)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::lines_filter_map_ok)]
+#![allow(clippy::manual_ok_err)]
+#![allow(clippy::for_kv_map)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::ptr_arg)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
@@ -233,10 +243,7 @@ async fn run_index(reindex: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_propagate(
-    temporal: bool,
-    project: Option<String>,
-) -> Result<()> {
+async fn run_propagate(temporal: bool, project: Option<String>) -> Result<()> {
     println!("📈 Running utility propagation...\n");
 
     // Run the main propagation pipeline
@@ -246,7 +253,10 @@ async fn run_propagate(
     println!("   Episodes processed: {}", result.episodes_processed);
     println!("   Decayed: {}", result.decayed_episodes);
     println!("   Propagated: {}", result.propagated_episodes);
-    println!("   Total utility change: {:+.3}", result.total_utility_change);
+    println!(
+        "   Total utility change: {:+.3}",
+        result.total_utility_change
+    );
 
     // Run temporal credit assignment if requested
     if temporal {
@@ -261,11 +271,7 @@ async fn run_propagate(
     Ok(())
 }
 
-fn run_prune(
-    older_than: Option<u32>,
-    min_utility: Option<f32>,
-    execute: bool,
-) -> Result<()> {
+fn run_prune(older_than: Option<u32>, min_utility: Option<f32>, execute: bool) -> Result<()> {
     println!("🗑️  Analyzing episodes for pruning...\n");
 
     if !execute {

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! LLM-based extraction using Anthropic API
 //!
 //! This module provides intent extraction and session analysis using Claude.
@@ -133,10 +134,7 @@ Respond ONLY with valid JSON, no other text."#;
             serde_json::from_str(text).context("Failed to parse LLM response as JSON")?;
 
         Ok(ExtractedIntent {
-            summary: parsed["summary"]
-                .as_str()
-                .unwrap_or("")
-                .to_string(),
+            summary: parsed["summary"].as_str().unwrap_or("").to_string(),
             task_type: parse_task_type(parsed["task_type"].as_str().unwrap_or("unknown")),
             tags: parsed["tags"]
                 .as_array()

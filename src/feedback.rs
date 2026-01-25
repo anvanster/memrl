@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+#![allow(dead_code)]
+
+use anyhow::Result;
 use chrono::Utc;
 use std::io::{BufRead, Write};
 
@@ -6,11 +8,7 @@ use crate::config::Config;
 use crate::store::EpisodeStore;
 
 /// Run the feedback command
-pub async fn run(
-    feedback_type: &str,
-    episodes: Option<String>,
-    _config: &Config,
-) -> Result<()> {
+pub async fn run(feedback_type: &str, episodes: Option<String>, _config: &Config) -> Result<()> {
     let store = EpisodeStore::new()?;
 
     // Determine which episodes to provide feedback for
@@ -49,7 +47,10 @@ pub async fn run(
         }
     };
 
-    println!("📝 Recording feedback for {} episode(s)...", episode_ids.len());
+    println!(
+        "📝 Recording feedback for {} episode(s)...",
+        episode_ids.len()
+    );
 
     let mut updated = 0;
     for id in &episode_ids {
@@ -78,11 +79,7 @@ pub async fn run(
 }
 
 /// Update episode with feedback
-fn update_episode_feedback(
-    store: &EpisodeStore,
-    id: &str,
-    is_helpful: Option<bool>,
-) -> Result<()> {
+fn update_episode_feedback(store: &EpisodeStore, id: &str, is_helpful: Option<bool>) -> Result<()> {
     let mut episode = store.load(id)?;
 
     // Update the most recent retrieval record
@@ -184,6 +181,7 @@ pub fn batch_feedback(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -131,8 +133,7 @@ impl Utility {
         let z = 1.96; // 95% confidence
 
         // Wilson score lower bound
-        let score = (p + z * z / (2.0 * n)
-            - z * ((p * (1.0 - p) + z * z / (4.0 * n)) / n).sqrt())
+        let score = (p + z * z / (2.0 * n) - z * ((p * (1.0 - p) + z * z / (4.0 * n)) / n).sqrt())
             / (1.0 + z * z / n);
 
         score as f32
@@ -271,10 +272,10 @@ impl Episode {
     }
 
     /// Parse from markdown (basic implementation)
-    pub fn from_markdown(content: &str, file_path: &std::path::Path) -> anyhow::Result<Self> {
+    pub fn from_markdown(content: &str, _file_path: &std::path::Path) -> anyhow::Result<Self> {
         // Basic parsing - extract key fields from markdown
         // This is a simplified implementation
-        
+
         let mut episode = Episode::new(
             extract_field(content, "**Project**:").unwrap_or_default(),
             extract_section(content, "## Intent").unwrap_or_default(),

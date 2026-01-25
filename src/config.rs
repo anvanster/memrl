@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -190,8 +192,8 @@ impl Config {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)
                 .with_context(|| format!("Failed to read config from {}", config_path.display()))?;
-            let config: Config = toml::from_str(&content)
-                .with_context(|| "Failed to parse config.toml")?;
+            let config: Config =
+                toml::from_str(&content).with_context(|| "Failed to parse config.toml")?;
             Ok(config)
         } else {
             // Return default config if file doesn't exist
@@ -266,6 +268,9 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&toml_str).unwrap();
-        assert_eq!(config.retrieval.default_limit, parsed.retrieval.default_limit);
+        assert_eq!(
+            config.retrieval.default_limit,
+            parsed.retrieval.default_limit
+        );
     }
 }

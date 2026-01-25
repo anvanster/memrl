@@ -3,9 +3,19 @@
 //! This binary implements the Model Context Protocol (MCP) server for MemRL,
 //! allowing Claude Code to access episodic memory functionality.
 
+// Allow common clippy warnings for prototype code
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::single_char_add_str)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::lines_filter_map_ok)]
+#![allow(clippy::manual_ok_err)]
+#![allow(clippy::for_kv_map)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::ptr_arg)]
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 
 mod config;
@@ -25,6 +35,7 @@ struct McpServer {
 /// JSON-RPC 2.0 Request
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
@@ -220,6 +231,24 @@ impl McpServer {
                     }
                 }),
             },
+            Tool {
+                name: "memrl_propagate".to_string(),
+                description: "Run utility propagation to spread value from helpful episodes to similar ones. Use this periodically to improve memory quality.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "temporal": {
+                            "type": "boolean",
+                            "description": "Also run temporal credit assignment (credits episodes that preceded successful outcomes)",
+                            "default": false
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Filter propagation to a specific project (optional)"
+                        }
+                    }
+                }),
+            },
         ];
 
         Ok(json!({ "tools": tools }))
@@ -243,6 +272,7 @@ impl McpServer {
             "memrl_capture" => self.tool_capture(&arguments).await,
             "memrl_feedback" => self.tool_feedback(&arguments).await,
             "memrl_stats" => self.tool_stats(&arguments).await,
+            "memrl_propagate" => self.tool_propagate(&arguments).await,
             _ => Err(format!("Unknown tool: {}", name)),
         };
 
@@ -270,10 +300,7 @@ impl McpServer {
             .and_then(|v| v.as_str())
             .ok_or("Missing query parameter")?;
 
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5) as usize;
+        let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
         let project = args.get("project").and_then(|v| v.as_str());
 
@@ -597,6 +624,137 @@ impl McpServer {
 
         Ok(output)
     }
+
+    /// Run utility propagation
+    async fn tool_propagate(&self, args: &Value) -> Result<String, String> {
+        let temporal = args
+            .get("temporal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let project_filter = args.get("project").and_then(|v| v.as_str());
+
+        let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
+        let _config = config::Config::load().map_err(|e| e.to_string())?;
+        let params = utility::UtilityParams::default();
+
+        let mut output = String::from("📈 Running utility propagation...\n\n");
+
+        // Get episodes (optionally filtered by project)
+        let all_episodes = store.list_all().map_err(|e| e.to_string())?;
+        let episodes: Vec<_> = if let Some(proj) = project_filter {
+            all_episodes
+                .into_iter()
+                .filter(|e| e.project.to_lowercase().contains(&proj.to_lowercase()))
+                .collect()
+        } else {
+            all_episodes
+        };
+
+        output.push_str(&format!("Processing {} episodes...\n", episodes.len()));
+
+        // Apply decay
+        let mut decayed_count = 0;
+        for ep in &episodes {
+            if let Some(last_retrieval) = ep.retrieval_history.last() {
+                let days_since = (chrono::Utc::now() - last_retrieval.timestamp).num_days() as f64;
+                if days_since > 0.0 {
+                    let decay = (1.0 - params.decay_rate).powf(days_since);
+                    if decay < 0.99 {
+                        decayed_count += 1;
+                    }
+                }
+            }
+        }
+
+        output.push_str(&format!(
+            "  📉 Decay applied to {} episodes\n",
+            decayed_count
+        ));
+
+        // Run Bellman propagation using vector similarity
+        let mut propagated_count = 0;
+        let mut propagation_delta = 0.0f64;
+
+        if let Ok(indexer) = indexer::EpisodeIndexer::new().await {
+            if indexer.is_indexed().await {
+                // Find high-value episodes to propagate from
+                let high_value: Vec<_> = episodes
+                    .iter()
+                    .filter(|e| e.utility.calculate_score() > 0.6)
+                    .collect();
+
+                for source_ep in high_value {
+                    // Find similar episodes
+                    let query = format!(
+                        "{} {}",
+                        source_ep.intent.raw_prompt,
+                        source_ep.intent.domain.join(" ")
+                    );
+
+                    if let Ok(similar) = indexer.search(&query, 5, project_filter).await {
+                        for result in similar {
+                            if result.id != source_ep.id
+                                && result.similarity_score >= params.propagation_threshold
+                            {
+                                if let Ok(mut target_ep) = store.load(&result.id) {
+                                    let source_utility = source_ep.utility.calculate_score();
+                                    let target_utility = target_ep.utility.calculate_score();
+
+                                    // Bellman update: Q(s) += α * (γ * Q(s') - Q(s)) * similarity
+                                    let update = params.learning_rate as f32
+                                        * (params.discount_factor as f32 * source_utility
+                                            - target_utility)
+                                        * result.similarity_score;
+
+                                    if update.abs() > 0.001 {
+                                        target_ep.utility.score =
+                                            Some((target_utility + update).clamp(0.0, 1.0));
+                                        if store.update(&target_ep).is_ok() {
+                                            propagated_count += 1;
+                                            propagation_delta += update as f64;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        output.push_str(&format!(
+            "  🔄 Propagated value to {} episodes\n",
+            propagated_count
+        ));
+        output.push_str(&format!(
+            "  📊 Total utility change: {:+.3}\n",
+            propagation_delta
+        ));
+
+        // Temporal credit assignment
+        if temporal {
+            output.push_str("\n⏱️  Running temporal credit assignment...\n");
+
+            let credited = utility::temporal_credit_assignment(&store, project_filter, &params)
+                .map_err(|e| e.to_string())?;
+
+            output.push_str(&format!("  ✅ Credited {} episodes\n", credited));
+        }
+
+        // Sync to vector index
+        if let Ok(mut indexer) = indexer::EpisodeIndexer::new().await {
+            let updated_episodes = store.list_all().map_err(|e| e.to_string())?;
+            for ep in &updated_episodes {
+                let _ = indexer.index_episode(ep).await;
+            }
+            output.push_str("  💾 Synced to vector index\n");
+        }
+
+        output.push_str("\n✅ Propagation complete!");
+
+        Ok(output)
+    }
 }
 
 /// Try vector-based retrieval
@@ -656,14 +814,12 @@ fn record_mcp_retrieval(
 
     for scored in episodes {
         let mut episode = scored.episode.clone();
-        episode
-            .retrieval_history
-            .push(episode::RetrievalRecord {
-                timestamp: chrono::Utc::now(),
-                project: project.clone(),
-                task_description: query.to_string(),
-                was_helpful: None,
-            });
+        episode.retrieval_history.push(episode::RetrievalRecord {
+            timestamp: chrono::Utc::now(),
+            project: project.clone(),
+            task_description: query.to_string(),
+            was_helpful: None,
+        });
         episode.utility.retrieval_count += 1;
         store.update(&episode)?;
     }
