@@ -119,11 +119,15 @@ propagation_threshold: 0.5 // 50% similarity minimum for propagation
 **MCP Server** (`src/mcp_server.rs`)
 - Full MCP (Model Context Protocol) server implementation
 - JSON-RPC 2.0 over stdio
-- Four MCP tools exposed:
-  - `memrl_retrieve`: Search episodic memory for relevant experiences
+- Five MCP tools exposed:
+  - `memrl_retrieve`: Multi-mode retrieval tool
+    - Semantic search: `query: "search term"`
+    - List all episodes: `all: true`
+    - Show episode details: `query: "episode_id"`
   - `memrl_capture`: Capture current session as an episode
   - `memrl_feedback`: Record whether retrieved episodes were helpful
   - `memrl_stats`: Get memory statistics
+  - `memrl_propagate`: Run utility propagation with optional temporal credit
 - Automatic vector search with fallback
 - Claude Code integration via mcp-config.json
 
@@ -266,10 +270,11 @@ Alternatively, edit `~/.claude.json` directly:
 3. Restart Claude Code and verify with `/mcp` command.
 
 4. The following tools become available to Claude:
-   - `memrl_retrieve` - Search for relevant past experiences
+   - `memrl_retrieve` - Search, list, or show episode details
    - `memrl_capture` - Save current session to memory
    - `memrl_feedback` - Mark episodes as helpful/unhelpful
    - `memrl_stats` - View memory statistics
+   - `memrl_propagate` - Run utility propagation
 
 ## Hook Integration
 
@@ -347,12 +352,12 @@ Episode captured: abc12345
 ## Working Example
 
 MemRL is actively used in this project! Current memory stats:
-- 8 episodes captured
-- 62.5% success rate
+- 12+ episodes captured
 - Semantic search working with BGE-Small embeddings
-- MCP integration verified and operational
+- 5 MCP tools operational
+- Utility propagation and temporal credit working
 
 ---
 
-*Last updated: 2026-01-24*
+*Last updated: 2026-01-25*
 *All 4 phases complete*
