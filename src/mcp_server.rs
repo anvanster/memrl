@@ -139,7 +139,7 @@ impl McpServer {
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language description of what you're trying to do"
+                            "description": "Natural language description of what you're trying to do, OR an episode ID to get full details"
                         },
                         "limit": {
                             "type": "integer",
@@ -149,9 +149,14 @@ impl McpServer {
                         "project": {
                             "type": "string",
                             "description": "Filter by project name (optional)"
+                        },
+                        "all": {
+                            "type": "boolean",
+                            "description": "If true, list all episodes instead of searching (ignores query)",
+                            "default": false
                         }
                     },
-                    "required": ["query"]
+                    "required": []
                 }),
             },
             Tool {
@@ -295,19 +300,31 @@ impl McpServer {
 
     /// Retrieve relevant episodes
     async fn tool_retrieve(&self, args: &Value) -> Result<String, String> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing query parameter")?;
-
+        let query = args.get("query").and_then(|v| v.as_str());
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-
         let project = args.get("project").and_then(|v| v.as_str());
+        let list_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let config = config::Config::load().map_err(|e| e.to_string())?;
         let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
 
-        // Try vector search first
+        // Case 1: List all episodes
+        if list_all {
+            return self.list_all_episodes(&store, limit, project).await;
+        }
+
+        // Need query for other cases
+        let query = query.ok_or("Missing query parameter (or use all: true to list episodes)")?;
+
+        // Case 2: Query looks like an episode ID - show full details
+        if Self::looks_like_episode_id(query) {
+            if let Some(output) = self.show_episode_by_id(&store, query).await? {
+                return Ok(output);
+            }
+            // If not found by ID, fall through to search
+        }
+
+        // Case 3: Semantic search
         let episodes = match try_vector_retrieve(query, limit, project, &config).await {
             Ok(eps) if !eps.is_empty() => eps,
             _ => {
@@ -754,6 +771,152 @@ impl McpServer {
         output.push_str("\n✅ Propagation complete!");
 
         Ok(output)
+    }
+
+    /// Check if a string looks like an episode ID
+    fn looks_like_episode_id(s: &str) -> bool {
+        // Episode IDs are UUIDs (36 chars with hyphens) or short IDs (8 hex chars)
+        let s = s.trim();
+        if s.len() == 8 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return true;
+        }
+        if s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return true;
+        }
+        false
+    }
+
+    /// List all episodes
+    async fn list_all_episodes(
+        &self,
+        store: &store::EpisodeStore,
+        limit: usize,
+        project: Option<&str>,
+    ) -> Result<String, String> {
+        let mut episodes = store.list_all().map_err(|e| e.to_string())?;
+
+        // Filter by project if specified
+        if let Some(proj) = project {
+            episodes.retain(|e| e.project.to_lowercase().contains(&proj.to_lowercase()));
+        }
+
+        // Sort by timestamp (newest first)
+        episodes.sort_by(|a, b| b.timestamp_start.cmp(&a.timestamp_start));
+
+        // Apply limit
+        episodes.truncate(limit);
+
+        if episodes.is_empty() {
+            return Ok("No episodes found in memory.".to_string());
+        }
+
+        let mut output = format!("Listing {} episode(s):\n\n", episodes.len());
+
+        for (i, ep) in episodes.iter().enumerate() {
+            let summary = if ep.intent.extracted_intent.is_empty() {
+                &ep.intent.raw_prompt
+            } else {
+                &ep.intent.extracted_intent
+            };
+            // Truncate summary for list view
+            let summary_short: String = summary.chars().take(60).collect();
+            let ellipsis = if summary.len() > 60 { "..." } else { "" };
+
+            output.push_str(&format!("{}. **{}{}**\n", i + 1, summary_short, ellipsis));
+            output.push_str(&format!("   - ID: {}\n", &ep.id[..8]));
+            output.push_str(&format!("   - Project: {}\n", ep.project));
+            output.push_str(&format!(
+                "   - Type: {} | Outcome: {}\n",
+                ep.intent.task_type, ep.outcome.status
+            ));
+            output.push_str(&format!(
+                "   - Date: {}\n",
+                ep.timestamp_start.format("%Y-%m-%d %H:%M")
+            ));
+            if !ep.intent.domain.is_empty() {
+                output.push_str(&format!("   - Tags: {}\n", ep.intent.domain.join(", ")));
+            }
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
+
+    /// Show full episode details by ID
+    async fn show_episode_by_id(
+        &self,
+        store: &store::EpisodeStore,
+        id: &str,
+    ) -> Result<Option<String>, String> {
+        // Try to find episode by ID (full or partial)
+        let episodes = store.list_all().map_err(|e| e.to_string())?;
+
+        let episode = episodes
+            .iter()
+            .find(|e| e.id.starts_with(id) || e.id[..8] == *id);
+
+        let ep = match episode {
+            Some(e) => e,
+            None => return Ok(None), // Not found, let search handle it
+        };
+
+        let mut output = String::from("Episode Details\n");
+        output.push_str("===============\n\n");
+
+        output.push_str(&format!("**ID**: {}\n", ep.id));
+        output.push_str(&format!("**Project**: {}\n", ep.project));
+        output.push_str(&format!("**Type**: {}\n", ep.intent.task_type));
+        output.push_str(&format!("**Outcome**: {}\n", ep.outcome.status));
+        output.push_str(&format!(
+            "**Date**: {} - {}\n",
+            ep.timestamp_start.format("%Y-%m-%d %H:%M"),
+            ep.timestamp_end.format("%H:%M")
+        ));
+        output.push_str(&format!(
+            "**Utility**: {:.0}%\n\n",
+            ep.utility.calculate_score() * 100.0
+        ));
+
+        output.push_str("## Intent\n");
+        if !ep.intent.extracted_intent.is_empty() {
+            output.push_str(&format!("{}\n\n", ep.intent.extracted_intent));
+        }
+        output.push_str(&format!("**Raw prompt**: {}\n\n", ep.intent.raw_prompt));
+
+        if !ep.intent.domain.is_empty() {
+            output.push_str(&format!("**Tags**: {}\n\n", ep.intent.domain.join(", ")));
+        }
+
+        if !ep.context.files_modified.is_empty() {
+            output.push_str("## Files Modified\n");
+            for f in &ep.context.files_modified {
+                output.push_str(&format!("- {}\n", f));
+            }
+            output.push('\n');
+        }
+
+        if !ep.context.errors_encountered.is_empty() {
+            output.push_str("## Errors Encountered\n");
+            for err in &ep.context.errors_encountered {
+                output.push_str(&format!("- **{}**: {}\n", err.error_type, err.message));
+                if let Some(res) = &err.resolution {
+                    output.push_str(&format!("  - Resolution: {}\n", res));
+                }
+            }
+            output.push('\n');
+        }
+
+        output.push_str("## Retrieval Stats\n");
+        output.push_str(&format!(
+            "- Retrieved: {} times\n",
+            ep.utility.retrieval_count
+        ));
+        output.push_str(&format!(
+            "- Marked helpful: {} times\n",
+            ep.utility.helpful_count
+        ));
+
+        Ok(Some(output))
     }
 }
 
