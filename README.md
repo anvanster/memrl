@@ -77,15 +77,46 @@ Over time, frequently helpful knowledge rises to the top, while stale or unhelpf
 
 ## Installation
 
+### Prerequisites
+
+LanceDB requires the Protocol Buffers compiler (`protoc`) to build:
+
+**macOS:**
+```bash
+brew install protobuf
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt install protobuf-compiler
+```
+
+**Windows:**
+```powershell
+# Using Chocolatey
+choco install protoc
+
+# Or download from: https://github.com/protocolbuffers/protobuf/releases
+# Add to PATH after extraction
+```
+
+### Build from Source
+
 ```bash
 # Clone and build
 git clone https://github.com/anvanster/memrl.git
-cd MemRL
+cd memrl
 cargo build --release
 
 # Two binaries are created:
 # - target/release/memrl      (CLI tool)
 # - target/release/memrl-mcp  (MCP server for Claude Code)
+```
+
+### Install from crates.io
+
+```bash
+cargo install memrl
 ```
 
 ### First Run - Model Download

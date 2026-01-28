@@ -1,6 +1,6 @@
 [package]
 name = "memrl"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Memory-augmented reinforcement learning for Claude Code - persistent memory that learns from experience"
 authors = ["Andrey Vasilevsky"]
