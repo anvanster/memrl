@@ -88,6 +88,21 @@ cargo build --release
 # - target/release/memrl-mcp  (MCP server for Claude Code)
 ```
 
+### First Run - Model Download
+
+On first use, MemRL downloads the BGE-Small embedding model (~128MB) for semantic search. This happens automatically and only once:
+
+```bash
+# Initialize and trigger model download
+memrl init
+
+# Output:
+# 🔄 Loading embedding model (this may download the model on first run)...
+# ✅ Embedding model loaded
+```
+
+The model is cached globally at `~/.memrl/models/` and shared across all projects.
+
 ## Setup with Claude Code
 
 ### 1. Add the MCP Server
@@ -192,7 +207,7 @@ memrl stats
 
 ## Data Storage
 
-MemRL stores everything locally in `~/.memrl/`:
+MemRL stores everything locally in `~/.memrl/` (shared across all projects):
 
 ```
 ~/.memrl/
@@ -200,9 +215,13 @@ MemRL stores everything locally in `~/.memrl/`:
 ├── episodes/                # Episode JSON files
 │   └── 2026-01-25/
 │       └── session-abc123.json
-└── vectors/                 # Vector database
-    └── episodes.lance/      # LanceDB embeddings
+├── vectors/                 # Vector database
+│   └── episodes.lance/      # LanceDB embeddings
+└── models/                  # Embedding model cache (~128MB)
+    └── models--Xenova--bge-small-en-v1.5/
 ```
+
+All projects share the same memory database, enabling cross-project learning.
 
 ## The RL Behind the Scenes
 
@@ -255,10 +274,13 @@ memrl stats
 4. Run `/mcp` to verify
 
 ### Embeddings slow on first run
-The BGE-Small model (~90MB) downloads on first use. Cached after that.
+The BGE-Small model (~128MB) downloads on first use from HuggingFace. This requires internet access. After download, the model is cached at `~/.memrl/models/` and works offline.
 
 ### Vector search not finding anything
 Run `memrl index` to create/update the vector database.
+
+### Model download fails
+If behind a firewall or proxy, ensure access to `huggingface.co`. The model files are downloaded via HTTPS.
 
 ## License
 
