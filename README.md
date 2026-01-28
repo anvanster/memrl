@@ -104,23 +104,31 @@ Exit and restart Claude Code to load the new MCP server.
 
 ### 3. Verify
 
-Run `/mcp` in Claude Code. You should see `memrl` with 5 tools.
+Run `/mcp` in Claude Code. You should see `memrl` with 7 tools.
 
 ## MCP Tools
 
 Once connected, Claude has access to these tools:
 
-| Tool | Description |
-|------|-------------|
-| `memrl_retrieve` | Search memories, list all episodes, or show episode details |
-| `memrl_capture` | Save the current session as an episode |
-| `memrl_feedback` | Mark episodes as helpful or not helpful |
-| `memrl_stats` | View memory statistics |
-| `memrl_propagate` | Run utility propagation (spread value to similar episodes) |
+| Tool | Description | When to Use |
+|------|-------------|-------------|
+| `memrl_retrieve` | Search memories by query, list all, or show details | **Start of session** - always check first |
+| `memrl_capture` | Save session as episode (auto-propagates utility) | **End of task** - capture successes proactively |
+| `memrl_feedback` | Mark episodes as helpful/not helpful | After using retrieved memories |
+| `memrl_status` | Check memory health for current project | Understand memory state |
+| `memrl_stats` | View overall memory statistics | Analytics and monitoring |
+| `memrl_propagate` | Spread value to similar episodes | Periodic maintenance |
+| `memrl_review` | Consolidate and cleanup memories | After related task series |
+
+### Key Lifecycle Behaviors
+
+**Start of session**: Claude should automatically check for relevant memories using `memrl_retrieve` before starting non-trivial tasks.
+
+**End of task**: Claude should proactively capture successful sessions using `memrl_capture` - don't wait to be asked. The capture tool automatically runs utility propagation.
+
+**Cross-project insights**: Use `memrl_capture(project: "other-project")` to tag memories for a different project.
 
 ### memrl_retrieve Modes
-
-The retrieve tool has three modes:
 
 ```
 Search:       memrl_retrieve(query: "authentication bug")

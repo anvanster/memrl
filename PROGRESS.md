@@ -119,15 +119,19 @@ propagation_threshold: 0.5 // 50% similarity minimum for propagation
 **MCP Server** (`src/mcp_server.rs`)
 - Full MCP (Model Context Protocol) server implementation
 - JSON-RPC 2.0 over stdio
-- Five MCP tools exposed:
-  - `memrl_retrieve`: Multi-mode retrieval tool
+- Seven MCP tools exposed:
+  - `memrl_retrieve`: Multi-mode retrieval tool (MANDATORY at session start)
     - Semantic search: `query: "search term"`
     - List all episodes: `all: true`
     - Show episode details: `query: "episode_id"`
-  - `memrl_capture`: Capture current session as an episode
+  - `memrl_capture`: Capture current session as an episode (MANDATORY after tasks)
+    - Accepts optional `project` parameter for cross-project insights
+    - Auto-runs utility propagation after capture
   - `memrl_feedback`: Record whether retrieved episodes were helpful
   - `memrl_stats`: Get memory statistics
+  - `memrl_status`: Check memory health for current project
   - `memrl_propagate`: Run utility propagation with optional temporal credit
+  - `memrl_review`: Consolidate and cleanup memories (run after related task series)
 - Automatic vector search with fallback
 - Claude Code integration via mcp-config.json
 
@@ -269,12 +273,14 @@ Alternatively, edit `~/.claude.json` directly:
 
 3. Restart Claude Code and verify with `/mcp` command.
 
-4. The following tools become available to Claude:
-   - `memrl_retrieve` - Search, list, or show episode details
-   - `memrl_capture` - Save current session to memory
+4. The following 7 tools become available to Claude:
+   - `memrl_retrieve` - Search, list, or show episode details (use at session start)
+   - `memrl_capture` - Save current session to memory (use after completing tasks)
    - `memrl_feedback` - Mark episodes as helpful/unhelpful
+   - `memrl_status` - Check memory health for current project
    - `memrl_stats` - View memory statistics
    - `memrl_propagate` - Run utility propagation
+   - `memrl_review` - Consolidate and cleanup memories
 
 ## Hook Integration
 

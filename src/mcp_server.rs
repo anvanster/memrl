@@ -133,7 +133,7 @@ impl McpServer {
         let tools = vec![
             Tool {
                 name: "memrl_retrieve".to_string(),
-                description: "Search episodic memory for relevant past coding experiences. Use this at the start of a task to find similar problems you've solved before.".to_string(),
+                description: "MANDATORY at session start for non-trivial tasks. Search episodic memory for similar problems you've solved before. If this is your first action in a session, always check for relevant memories first.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -161,7 +161,7 @@ impl McpServer {
             },
             Tool {
                 name: "memrl_capture".to_string(),
-                description: "Capture the current coding session as an episode for future reference. Call this at the end of a successful task.".to_string(),
+                description: "MANDATORY after completing any feature, bugfix, or refactor. Don't wait for user to ask - proactively capture successful sessions. Automatically runs utility propagation after capture.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -178,6 +178,10 @@ impl McpServer {
                             "type": "string",
                             "enum": ["success", "partial", "failure"],
                             "description": "Outcome of the task"
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Override project name (default: auto-detect from working directory). Use for cross-project insights."
                         },
                         "files_modified": {
                             "type": "array",
@@ -206,7 +210,7 @@ impl McpServer {
             },
             Tool {
                 name: "memrl_feedback".to_string(),
-                description: "Record whether retrieved episodes were helpful. This improves future retrieval quality.".to_string(),
+                description: "Record whether retrieved episodes were helpful. Call this after using memories - your feedback improves future retrieval quality.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -237,8 +241,21 @@ impl McpServer {
                 }),
             },
             Tool {
+                name: "memrl_status".to_string(),
+                description: "Check memory health for current project. Shows last capture date, episode count, and unused memories. Use this to understand your memory state.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project to check (default: auto-detect from working directory)"
+                        }
+                    }
+                }),
+            },
+            Tool {
                 name: "memrl_propagate".to_string(),
-                description: "Run utility propagation to spread value from helpful episodes to similar ones. Use this periodically to improve memory quality.".to_string(),
+                description: "Run utility propagation to spread value from helpful episodes to similar ones. Use periodically to improve memory quality.".to_string(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -250,6 +267,25 @@ impl McpServer {
                         "project": {
                             "type": "string",
                             "description": "Filter propagation to a specific project (optional)"
+                        }
+                    }
+                }),
+            },
+            Tool {
+                name: "memrl_review".to_string(),
+                description: "Review and consolidate memories after completing a series of related tasks. Identifies duplicate/similar episodes, stale memories, and optimization opportunities.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project to review (default: auto-detect from working directory)"
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["analyze", "cleanup"],
+                            "description": "analyze: show recommendations only. cleanup: apply safe optimizations (removes zero-utility duplicates)",
+                            "default": "analyze"
                         }
                     }
                 }),
@@ -277,7 +313,9 @@ impl McpServer {
             "memrl_capture" => self.tool_capture(&arguments).await,
             "memrl_feedback" => self.tool_feedback(&arguments).await,
             "memrl_stats" => self.tool_stats(&arguments).await,
+            "memrl_status" => self.tool_status(&arguments).await,
             "memrl_propagate" => self.tool_propagate(&arguments).await,
+            "memrl_review" => self.tool_review(&arguments).await,
             _ => Err(format!("Unknown tool: {}", name)),
         };
 
@@ -438,11 +476,17 @@ impl McpServer {
             })
             .unwrap_or_default();
 
-        // Get current project from working directory
-        let project = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "unknown".to_string());
+        // Get project from args or auto-detect from working directory
+        let project = args
+            .get("project")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
 
         // Create episode
         let mut ep = episode::Episode::new(project.clone(), summary.to_string());
@@ -497,23 +541,33 @@ impl McpServer {
         let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
         store.save(&ep).map_err(|e| e.to_string())?;
 
-        // Try to index the new episode
+        // Index the new episode
         if let Ok(mut indexer) = indexer::EpisodeIndexer::new().await {
             let _ = indexer.index_episode(&ep).await;
         }
 
-        Ok(format!(
+        let mut output = format!(
             "Episode captured successfully!\n\
              - ID: {}\n\
              - Project: {}\n\
              - Type: {}\n\
-             - Outcome: {}\n\n\
-             This experience is now stored for future reference.",
+             - Outcome: {}\n",
             &ep.id[..8],
             ep.project,
             ep.intent.task_type,
             ep.outcome.status
-        ))
+        );
+
+        // Auto-propagate utility to spread value
+        output.push_str("\n📈 Running auto-propagation...\n");
+        let propagate_result = self.run_propagation(Some(project.as_str()), false).await;
+        match propagate_result {
+            Ok(msg) => output.push_str(&msg),
+            Err(e) => output.push_str(&format!("  (propagation skipped: {})\n", e)),
+        }
+
+        output.push_str("\nThis experience is now stored for future reference.");
+        Ok(output)
     }
 
     /// Record feedback on episodes
@@ -769,6 +823,355 @@ impl McpServer {
         }
 
         output.push_str("\n✅ Propagation complete!");
+
+        Ok(output)
+    }
+
+    /// Check memory status for current project
+    async fn tool_status(&self, args: &Value) -> Result<String, String> {
+        let project = args
+            .get("project")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+
+        let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
+        let all_episodes = store.list_all().map_err(|e| e.to_string())?;
+
+        let project_episodes: Vec<_> = all_episodes
+            .iter()
+            .filter(|e| e.project.to_lowercase() == project.to_lowercase())
+            .collect();
+
+        let total_count = project_episodes.len();
+
+        if total_count == 0 {
+            return Ok(format!(
+                "📊 Memory Status for '{}'\n\
+                 ========================\n\n\
+                 No memories found for this project.\n\n\
+                 💡 Tip: After completing a task, use memrl_capture to save it.",
+                project
+            ));
+        }
+
+        // Find last capture date
+        let last_capture = project_episodes
+            .iter()
+            .map(|e| e.timestamp_start)
+            .max()
+            .unwrap();
+        let days_since_capture = (chrono::Utc::now() - last_capture).num_days();
+
+        // Find unused memories (never retrieved or not retrieved in 30+ days)
+        let unused: Vec<_> = project_episodes
+            .iter()
+            .filter(|e| {
+                if e.utility.retrieval_count == 0 {
+                    return true;
+                }
+                if let Some(last) = e.retrieval_history.last() {
+                    (chrono::Utc::now() - last.timestamp).num_days() > 30
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Calculate average utility
+        let avg_utility: f32 = if total_count > 0 {
+            project_episodes
+                .iter()
+                .map(|e| e.utility.calculate_score())
+                .sum::<f32>()
+                / total_count as f32
+        } else {
+            0.0
+        };
+
+        // Find high-value memories
+        let high_value: Vec<_> = project_episodes
+            .iter()
+            .filter(|e| e.utility.calculate_score() > 0.6)
+            .collect();
+
+        let mut output = format!("📊 Memory Status for '{}'\n", project);
+        output.push_str(&"=".repeat(24 + project.len()));
+        output.push_str("\n\n");
+
+        output.push_str(&format!("📁 Total memories: {}\n", total_count));
+        output.push_str(&format!(
+            "📅 Last capture: {} ({} days ago)\n",
+            last_capture.format("%Y-%m-%d"),
+            days_since_capture
+        ));
+        output.push_str(&format!("⭐ High-value memories: {}\n", high_value.len()));
+        output.push_str(&format!("💤 Unused memories: {}\n", unused.len()));
+        output.push_str(&format!(
+            "📈 Average utility: {:.0}%\n\n",
+            avg_utility * 100.0
+        ));
+
+        // Suggestions
+        output.push_str("💡 Suggestions:\n");
+
+        if days_since_capture > 7 {
+            output.push_str("  - You haven't captured memories recently. Remember to capture after completing tasks!\n");
+        }
+
+        if unused.len() > total_count / 2 {
+            output.push_str(
+                "  - Many memories are unused. Consider running memrl_review to consolidate.\n",
+            );
+        }
+
+        if avg_utility < 0.3 {
+            output.push_str(
+                "  - Low average utility. Use memrl_feedback to mark helpful memories.\n",
+            );
+        }
+
+        if high_value.is_empty() {
+            output.push_str(
+                "  - No high-value memories yet. Keep using feedback to build utility scores.\n",
+            );
+        } else {
+            output.push_str(&format!(
+                "  - {} high-value memories ready to help with similar tasks.\n",
+                high_value.len()
+            ));
+        }
+
+        Ok(output)
+    }
+
+    /// Review and consolidate memories
+    async fn tool_review(&self, args: &Value) -> Result<String, String> {
+        let project = args
+            .get("project")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("analyze");
+
+        let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
+        let all_episodes = store.list_all().map_err(|e| e.to_string())?;
+
+        let project_episodes: Vec<_> = all_episodes
+            .into_iter()
+            .filter(|e| e.project.to_lowercase() == project.to_lowercase())
+            .collect();
+
+        if project_episodes.is_empty() {
+            return Ok(format!("No memories found for project '{}'.", project));
+        }
+
+        let mut output = format!("🔍 Memory Review for '{}'\n", project);
+        output.push_str(&"=".repeat(22 + project.len()));
+        output.push_str("\n\n");
+
+        // Find stale memories (old with low utility)
+        let stale: Vec<_> = project_episodes
+            .iter()
+            .filter(|e| {
+                let age_days = (chrono::Utc::now() - e.timestamp_start).num_days();
+                let utility = e.utility.calculate_score();
+                age_days > 30 && utility < 0.2
+            })
+            .collect();
+
+        // Find potential duplicates (similar intents)
+        let mut duplicates: Vec<(&episode::Episode, &episode::Episode)> = Vec::new();
+        for i in 0..project_episodes.len() {
+            for j in (i + 1)..project_episodes.len() {
+                let e1 = &project_episodes[i];
+                let e2 = &project_episodes[j];
+                // Simple check: same task type and similar summary
+                if e1.intent.task_type == e2.intent.task_type {
+                    let s1 = e1.intent.extracted_intent.to_lowercase();
+                    let s2 = e2.intent.extracted_intent.to_lowercase();
+                    // Check word overlap
+                    let words1: std::collections::HashSet<_> = s1.split_whitespace().collect();
+                    let words2: std::collections::HashSet<_> = s2.split_whitespace().collect();
+                    let intersection = words1.intersection(&words2).count();
+                    let union = words1.union(&words2).count();
+                    if union > 0 && (intersection as f64 / union as f64) > 0.6 {
+                        duplicates.push((e1, e2));
+                    }
+                }
+            }
+        }
+
+        // Find zero-utility episodes
+        let zero_utility: Vec<_> = project_episodes
+            .iter()
+            .filter(|e| e.utility.calculate_score() < 0.05 && e.utility.retrieval_count == 0)
+            .collect();
+
+        output.push_str("📊 Analysis Results:\n");
+        output.push_str(&format!("  - Total memories: {}\n", project_episodes.len()));
+        output.push_str(&format!("  - Stale (>30d, low utility): {}\n", stale.len()));
+        output.push_str(&format!("  - Potential duplicates: {}\n", duplicates.len()));
+        output.push_str(&format!(
+            "  - Zero utility (never used): {}\n\n",
+            zero_utility.len()
+        ));
+
+        if !stale.is_empty() {
+            output.push_str("📅 Stale Memories:\n");
+            for ep in stale.iter().take(5) {
+                let summary: String = ep.intent.extracted_intent.chars().take(50).collect();
+                output.push_str(&format!("  - {} ({}...)\n", &ep.id[..8], summary));
+            }
+            if stale.len() > 5 {
+                output.push_str(&format!("  ... and {} more\n", stale.len() - 5));
+            }
+            output.push('\n');
+        }
+
+        if !duplicates.is_empty() {
+            output.push_str("🔄 Potential Duplicates:\n");
+            for (e1, e2) in duplicates.iter().take(3) {
+                output.push_str(&format!("  - {} ≈ {}\n", &e1.id[..8], &e2.id[..8]));
+            }
+            if duplicates.len() > 3 {
+                output.push_str(&format!("  ... and {} more pairs\n", duplicates.len() - 3));
+            }
+            output.push('\n');
+        }
+
+        if action == "cleanup" {
+            output.push_str("🧹 Cleanup Actions:\n");
+            let mut removed = 0;
+
+            // Only remove zero-utility episodes that are also potential duplicates
+            for ep in &zero_utility {
+                let is_duplicate = duplicates
+                    .iter()
+                    .any(|(e1, e2)| e1.id == ep.id || e2.id == ep.id);
+                if is_duplicate {
+                    if store.delete(&ep.id).is_ok() {
+                        removed += 1;
+                        output.push_str(&format!(
+                            "  ✓ Removed {} (zero-utility duplicate)\n",
+                            &ep.id[..8]
+                        ));
+                    }
+                }
+            }
+
+            if removed == 0 {
+                output.push_str("  No safe cleanup actions available.\n");
+                output.push_str("  (Only zero-utility duplicates are auto-removed)\n");
+            } else {
+                output.push_str(&format!("\n✅ Removed {} episode(s)\n", removed));
+            }
+        } else {
+            output.push_str("💡 Recommendations:\n");
+            if !zero_utility.is_empty() && !duplicates.is_empty() {
+                output
+                    .push_str("  - Run with action: 'cleanup' to remove zero-utility duplicates\n");
+            }
+            if !stale.is_empty() {
+                output.push_str("  - Consider manually reviewing stale memories\n");
+            }
+            if duplicates.is_empty() && stale.is_empty() && zero_utility.is_empty() {
+                output.push_str("  - Your memory is healthy! No issues found.\n");
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Helper: Run propagation (used by capture and propagate tools)
+    async fn run_propagation(
+        &self,
+        project_filter: Option<&str>,
+        temporal: bool,
+    ) -> Result<String, String> {
+        let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
+        let params = utility::UtilityParams::default();
+
+        let all_episodes = store.list_all().map_err(|e| e.to_string())?;
+        let episodes: Vec<_> = if let Some(proj) = project_filter {
+            all_episodes
+                .into_iter()
+                .filter(|e| e.project.to_lowercase().contains(&proj.to_lowercase()))
+                .collect()
+        } else {
+            all_episodes
+        };
+
+        if episodes.is_empty() {
+            return Ok("  No episodes to propagate.\n".to_string());
+        }
+
+        let mut propagated_count = 0;
+
+        if let Ok(indexer) = indexer::EpisodeIndexer::new().await {
+            if indexer.is_indexed().await {
+                let high_value: Vec<_> = episodes
+                    .iter()
+                    .filter(|e| e.utility.calculate_score() > 0.6)
+                    .collect();
+
+                for source_ep in high_value {
+                    let query = format!(
+                        "{} {}",
+                        source_ep.intent.raw_prompt,
+                        source_ep.intent.domain.join(" ")
+                    );
+
+                    if let Ok(similar) = indexer.search(&query, 5, project_filter).await {
+                        for result in similar {
+                            if result.id != source_ep.id
+                                && result.similarity_score >= params.propagation_threshold
+                            {
+                                if let Ok(mut target_ep) = store.load(&result.id) {
+                                    let source_utility = source_ep.utility.calculate_score();
+                                    let target_utility = target_ep.utility.calculate_score();
+
+                                    let update = params.learning_rate as f32
+                                        * (params.discount_factor as f32 * source_utility
+                                            - target_utility)
+                                        * result.similarity_score;
+
+                                    if update.abs() > 0.001 {
+                                        target_ep.utility.score =
+                                            Some((target_utility + update).clamp(0.0, 1.0));
+                                        if store.update(&target_ep).is_ok() {
+                                            propagated_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut output = format!("  Propagated value to {} episode(s)\n", propagated_count);
+
+        if temporal {
+            let credited = utility::temporal_credit_assignment(&store, project_filter, &params)
+                .map_err(|e| e.to_string())?;
+            output.push_str(&format!("  Temporal credit to {} episode(s)\n", credited));
+        }
 
         Ok(output)
     }
