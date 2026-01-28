@@ -210,6 +210,27 @@ cargo install memrl
   - Windows: Download and run `rustup-init.exe`
   - macOS/Linux: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
+- **Protocol Buffers Compiler (protoc)**: Required by LanceDB dependencies
+
+  **Windows:**
+  1. Download [protoc-34.0-rc-1-win64.zip](https://github.com/protocolbuffers/protobuf/releases/download/v34.0-rc1.1/protoc-34.0-rc-1-win64.zip)
+  2. Extract to a directory (e.g., `C:\tools\protoc`)
+  3. Set the environment variable:
+     ```powershell
+     $env:PROTOC = "C:\tools\protoc\bin\protoc.exe"
+     ```
+
+  **Linux:**
+  ```bash
+  # Download and extract protoc
+  wget https://github.com/protocolbuffers/protobuf/releases/download/v34.0-rc1.1/protoc-34.0-rc-1-linux-x86_64.zip
+  unzip protoc-34.0-rc-1-linux-x86_64.zip -d protoc
+
+  # Add to bashrc for persistence
+  echo "export PROTOC=$(pwd)/protoc/bin/protoc" >> ~/.bashrc
+  source ~/.bashrc
+  ```
+
 ### Build Steps
 
 ```bash
@@ -398,6 +419,12 @@ xattr -d com.apple.quarantine /usr/local/bin/memrl-mcp
 rm -rf ~/.memrl/episodes.db
 memrl status
 ```
+
+### Build Error: "protoc not found" or "PROTOC environment variable not set"
+
+**Problem**: Building from source fails because protoc is missing.
+
+**Solution**: See [Prerequisites](#prerequisites) section for protoc installation instructions.
 
 ### MCP Server Not Appearing in Claude Code
 
