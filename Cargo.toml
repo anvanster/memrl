@@ -2,10 +2,14 @@
 name = "memrl"
 version = "0.1.0"
 edition = "2024"
-description = "MemRL-inspired memory system for Claude Code"
-authors = ["Andrey"]
-license = "MIT"
-repository = "https://github.com/your-repo/memrl"
+description = "Memory-augmented reinforcement learning for Claude Code - persistent memory that learns from experience"
+authors = ["Andrey Vasilevsky"]
+license = "Apache-2.0"
+repository = "https://github.com/anvanster/memrl"
+homepage = "https://github.com/anvanster/memrl"
+keywords = ["claude", "mcp", "memory", "ai", "reinforcement-learning"]
+categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
 default-run = "memrl"
 
 [dependencies]

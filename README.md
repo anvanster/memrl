@@ -79,7 +79,7 @@ Over time, frequently helpful knowledge rises to the top, while stale or unhelpf
 
 ```bash
 # Clone and build
-git clone https://github.com/yourusername/MemRL.git
+git clone https://github.com/anvanster/memrl.git
 cd MemRL
 cargo build --release
 
@@ -284,7 +284,7 @@ If behind a firewall or proxy, ensure access to `huggingface.co`. The model file
 
 ## License
 
-MIT
+Apache 2.0
 
 ## Contributing
 
