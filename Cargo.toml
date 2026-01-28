@@ -1,6 +1,6 @@
 [package]
 name = "memrl"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Memory-augmented reinforcement learning for Claude Code - persistent memory that learns from experience"
 authors = ["Andrey Vasilevsky"]
@@ -57,6 +57,10 @@ git2 = "0.19"
 
 # HTTP client (for LLM API calls)
 reqwest = { version = "0.12", features = ["json"] }
+
+[build-dependencies]
+# Auto-download protoc for platforms without it installed
+protoc-prebuilt = "0.3"
 
 [dev-dependencies]
 tempfile = "3.14"
