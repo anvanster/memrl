@@ -1,4 +1,6 @@
 node_modules/
 tmp/
-# Downloaded binaries (placed here during npm install)
-binaries/
+
+# Platform-specific binaries (built by scripts/build-npm-package.sh)
+bin/memrl-*
+bin/memrl-mcp-*

@@ -25,3 +25,6 @@ Thumbs.db
 
 # Model cache (downloaded on first run)
 .fastembed_cache/
+
+# Prebuilt binaries for npm distribution (built locally)
+/prebuilt/

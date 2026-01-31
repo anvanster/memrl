@@ -2,15 +2,86 @@
 
 const { spawn } = require('child_process');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
-const ext = process.platform === 'win32' ? '.exe' : '';
-const binary = path.join(__dirname, '..', 'binaries', `memrl-mcp${ext}`);
+// Detect platform and architecture
+function getBinaryName() {
+  const platform = os.platform();
+  const arch = os.arch();
 
-const child = spawn(binary, process.argv.slice(2), {
+  let platformStr;
+  switch (platform) {
+    case 'darwin':
+      platformStr = 'darwin';
+      break;
+    case 'linux':
+      platformStr = 'linux';
+      break;
+    case 'win32':
+      platformStr = 'win32';
+      break;
+    default:
+      console.error(`Unsupported platform: ${platform}`);
+      process.exit(1);
+  }
+
+  let archStr;
+  switch (arch) {
+    case 'arm64':
+      archStr = 'arm64';
+      break;
+    case 'x64':
+      archStr = 'x64';
+      break;
+    default:
+      console.error(`Unsupported architecture: ${arch}`);
+      process.exit(1);
+  }
+
+  // Linux arm64 not yet supported
+  if (platform === 'linux' && arch === 'arm64') {
+    console.error('Linux arm64 is not yet supported. Please use x64.');
+    process.exit(1);
+  }
+
+  const ext = platform === 'win32' ? '.exe' : '';
+  return `memrl-mcp-${platformStr}-${archStr}${ext}`;
+}
+
+// Find the binary path
+function findBinary() {
+  const binaryName = getBinaryName();
+  const binDir = __dirname;
+  const binaryPath = path.join(binDir, binaryName);
+
+  if (!fs.existsSync(binaryPath)) {
+    console.error(`Binary not found: ${binaryPath}`);
+    console.error('Please reinstall the package: npm install -g @anvanster/memrl');
+    process.exit(1);
+  }
+
+  return binaryPath;
+}
+
+// Main
+const binaryPath = findBinary();
+
+// Spawn the binary with all arguments
+const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: 'inherit',
-  env: process.env,
+  env: process.env
 });
 
-child.on('close', (code) => {
-  process.exit(code ?? 0);
+child.on('error', (err) => {
+  console.error(`Failed to start memrl-mcp: ${err.message}`);
+  process.exit(1);
 });
+
+child.on('exit', (code) => {
+  process.exit(code || 0);
+});
+
+// Forward signals
+process.on('SIGINT', () => child.kill('SIGINT'));
+process.on('SIGTERM', () => child.kill('SIGTERM'));

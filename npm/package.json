@@ -21,12 +21,8 @@
     "memrl": "bin/memrl",
     "memrl-mcp": "bin/memrl-mcp"
   },
-  "scripts": {
-    "postinstall": "node scripts/install.js"
-  },
   "files": [
-    "bin",
-    "scripts"
+    "bin"
   ],
   "engines": {
     "node": ">=14"
