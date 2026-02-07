@@ -1,6 +1,0 @@
-node_modules/
-tmp/
-
-# Platform-specific binaries (built by scripts/build-npm-package.sh)
-bin/tempera-*
-bin/tempera-mcp-*
