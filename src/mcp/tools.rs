@@ -7,13 +7,13 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
     vec![
         Tool {
             name: "tempera_retrieve".to_string(),
-            description: "MANDATORY at session start for non-trivial tasks. Search episodic memory for similar problems you've solved before. If this is your first action in a session, always check for relevant memories first.".to_string(),
+            description: "Search episodic memory for reusable insights from past sessions. Call at session start for non-trivial tasks. Look for: debugging strategies that worked, creative solutions to similar problems, mistakes to avoid, and patterns that transferred across contexts. Focus on retrieving *how* problems were solved, not *what* was changed.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Natural language description of what you're trying to do, OR an episode ID to get full details"
+                        "description": "Describe the challenge or pattern you're facing, not just the topic. Good: 'tree-sitter grammar producing ERROR nodes instead of expected AST'. Bad: 'fix codegraph-tcl'. An episode ID also works for full details."
                     },
                     "limit": {
                         "type": "integer",
@@ -35,13 +35,13 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "tempera_capture".to_string(),
-            description: "MANDATORY after completing any feature, bugfix, or refactor. Don't wait for user to ask - proactively capture successful sessions. Automatically runs utility propagation after capture.".to_string(),
+            description: "Capture reusable insights after completing a task. Focus on TRANSFERABLE KNOWLEDGE — not what changed (commits track that), but what you LEARNED. Capture: debugging strategies, creative solutions, surprising behaviors, mistakes avoided, and patterns that would help solve a DIFFERENT problem in a FUTURE session. Litmus test: 'Would this help a model with no context about this project?' If yes, capture it. If it reads like a commit message, rewrite it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "summary": {
                         "type": "string",
-                        "description": "Brief summary of what was accomplished"
+                        "description": "Describe the INSIGHT, not the change. Bad: 'Fixed 24 failing tests in codegraph-tcl visitor.rs'. Good: 'tree-sitter grammars with ABI version patches can split first-position commands into ERROR(keyword)+command(args) sibling pairs. Fix: stitch siblings only when on same line (end_row==start_row) to avoid false joins across lines. Fragmented bodies require scanning scattered simple_word nodes for keywords instead of visiting structured body nodes.'"
                     },
                     "task_type": {
                         "type": "string",
@@ -65,7 +65,7 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                     "tags": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Domain tags for categorization"
+                        "description": "Tags for retrieval — use problem-domain terms (e.g., 'tree-sitter', 'error-recovery', 'sibling-stitching'), not project names"
                     },
                     "errors_resolved": {
                         "type": "array",
@@ -76,7 +76,7 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                                 "resolution": { "type": "string" }
                             }
                         },
-                        "description": "Errors encountered and how they were resolved"
+                        "description": "Errors encountered and the STRATEGY used to resolve them — focus on the approach, not the specific code change"
                     }
                 },
                 "required": ["summary", "task_type", "outcome"]
@@ -84,7 +84,7 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "tempera_feedback".to_string(),
-            description: "Record whether retrieved episodes were helpful. Call this after using memories - your feedback improves future retrieval quality.".to_string(),
+            description: "Record whether retrieved episodes actually influenced your approach. Call after using memories. 'Helpful' means the insight changed how you solved the problem — not just that it was topically related.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

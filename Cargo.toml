@@ -1,6 +1,6 @@
 [package]
 name = "tempera"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Tempera - persistent memory for Claude Code that learns from experience"
 authors = ["Andrey Vasilevsky"]
