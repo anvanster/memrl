@@ -26,7 +26,7 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         .iter()
         .map(|e| e.timestamp_start)
         .max()
-        .unwrap();
+        .expect("non-empty project_episodes guaranteed by early return above");
     let days_since_capture = (chrono::Utc::now() - last_capture).num_days();
 
     // Find unused memories (never retrieved or not retrieved in 30+ days)
@@ -45,21 +45,32 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         .collect();
 
     // Calculate average utility
-    let avg_utility: f32 = if total_count > 0 {
-        project_episodes
-            .iter()
-            .map(|e| e.utility.calculate_score())
-            .sum::<f32>()
-            / total_count as f32
+    let avg_utility: f32 = project_episodes
+        .iter()
+        .map(|e| e.utility.calculate_score())
+        .sum::<f32>()
+        / total_count as f32;
+
+    // Find high-value memories (lowered from 0.6 to 0.4 — Wilson at 3/3 helpful = 0.44)
+    let high_value: Vec<_> = project_episodes
+        .iter()
+        .filter(|e| e.utility.calculate_score() > 0.4)
+        .collect();
+
+    // Calculate feedback rate
+    let total_retrievals: u32 = project_episodes
+        .iter()
+        .map(|e| e.utility.retrieval_count)
+        .sum();
+    let total_helpful: u32 = project_episodes
+        .iter()
+        .map(|e| e.utility.helpful_count)
+        .sum();
+    let feedback_rate = if total_retrievals > 0 {
+        total_helpful as f32 / total_retrievals as f32
     } else {
         0.0
     };
-
-    // Find high-value memories
-    let high_value: Vec<_> = project_episodes
-        .iter()
-        .filter(|e| e.utility.calculate_score() > 0.6)
-        .collect();
 
     let mut output = format!("📊 Memory Status for '{}'\n", project);
     output.push_str(&"=".repeat(24 + project.len()));
@@ -74,8 +85,14 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     output.push_str(&format!("⭐ High-value memories: {}\n", high_value.len()));
     output.push_str(&format!("💤 Unused memories: {}\n", unused.len()));
     output.push_str(&format!(
-        "📈 Average utility: {:.0}%\n\n",
+        "📈 Average utility: {:.0}%\n",
         avg_utility * 100.0
+    ));
+    output.push_str(&format!(
+        "🔄 Feedback rate: {} of {} retrievals ({:.0}%)\n\n",
+        total_helpful,
+        total_retrievals,
+        feedback_rate * 100.0
     ));
 
     // Suggestions
@@ -91,7 +108,14 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         );
     }
 
-    if avg_utility < 0.3 {
+    if feedback_rate < 0.2 && total_retrievals > 5 {
+        output.push_str(&format!(
+            "  - Low feedback rate ({:.0}%). Use tempera_feedback after retrievals to improve BKM quality.\n",
+            feedback_rate * 100.0
+        ));
+    }
+
+    if avg_utility < 0.3 && total_retrievals > 0 {
         output
             .push_str("  - Low average utility. Use tempera_feedback to mark helpful memories.\n");
     }

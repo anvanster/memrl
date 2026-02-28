@@ -35,7 +35,7 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "tempera_capture".to_string(),
-            description: "Capture reusable insights after completing a task. Focus on TRANSFERABLE KNOWLEDGE — not what changed (commits track that), but what you LEARNED. Capture: debugging strategies, creative solutions, surprising behaviors, mistakes avoided, and patterns that would help solve a DIFFERENT problem in a FUTURE session. Litmus test: 'Would this help a model with no context about this project?' If yes, capture it. If it reads like a commit message, rewrite it.".to_string(),
+            description: "Capture reusable insights as Best Known Methods (BKMs). Capture early and often during sessions — the system automatically consolidates with similar existing BKMs instead of creating duplicates. Focus on TRANSFERABLE KNOWLEDGE: debugging strategies, creative solutions, surprising behaviors, and patterns that would help solve a DIFFERENT problem in a FUTURE session. Litmus test: 'Would this help a model with no context about this project?' If yes, capture it. If it reads like a commit message, rewrite it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -147,7 +147,7 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "tempera_review".to_string(),
-            description: "Review and consolidate memories after completing a series of related tasks. Identifies duplicate/similar episodes, stale memories, and optimization opportunities.".to_string(),
+            description: "Review and consolidate BKMs. Actions: 'analyze' (default) shows duplicate clusters, stale memories, and feedback rate. 'consolidate' merges duplicate clusters into refined BKMs (keeps most recent, union-merges tags/errors/files, deletes duplicates). 'cleanup' removes stale zero-engagement memories. Use consolidate after a series of related tasks to keep memory lean.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -157,8 +157,8 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                     },
                     "action": {
                         "type": "string",
-                        "enum": ["analyze", "cleanup"],
-                        "description": "analyze: show recommendations only. cleanup: apply safe optimizations (removes zero-utility duplicates)",
+                        "enum": ["analyze", "consolidate", "cleanup"],
+                        "description": "analyze: show duplicate clusters, stale memories, feedback rate. consolidate: merge duplicate clusters into refined BKMs. cleanup: remove stale zero-engagement memories.",
                         "default": "analyze"
                     }
                 }
