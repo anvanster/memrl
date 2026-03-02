@@ -31,10 +31,12 @@ impl EpisodeIndexer {
         std::fs::create_dir_all(&index_path)?;
 
         // Initialize the embedding model with global cache directory
-        // Set env var to prevent fastembed from creating .fastembed_cache/ in CWD
+        // MUST set FASTEMBED_CACHE_DIR before InitOptions::new() — its Default impl
+        // calls get_cache_dir() which falls back to ".fastembed_cache" in CWD.
+        // Note: the env var is FASTEMBED_CACHE_DIR (not _PATH).
         let cache_dir = Self::model_cache_path()?;
         std::fs::create_dir_all(&cache_dir)?;
-        unsafe { std::env::set_var("FASTEMBED_CACHE_PATH", &cache_dir) };
+        unsafe { std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir) };
 
         println!("Loading embedding model (this may download the model on first run)...");
         let embedder = TextEmbedding::try_new(
