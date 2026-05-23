@@ -12,11 +12,12 @@
 #![allow(clippy::ptr_arg)]
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 mod capture;
 mod config;
 mod episode;
+mod eval;
 mod feedback;
 mod indexer;
 mod llm;
@@ -161,6 +162,44 @@ enum Commands {
 
     /// Initialize tempera in current project
     Init,
+
+    /// Retrieval evaluation harness (P@K, R@K, MRR, nDCG@K)
+    Eval(EvalArgs),
+}
+
+#[derive(Args)]
+struct EvalArgs {
+    #[command(subcommand)]
+    command: EvalCommand,
+}
+
+#[derive(Subcommand)]
+enum EvalCommand {
+    /// Run the fixture and save the result as a new baseline.
+    Baseline {
+        /// Path to a JSONL fixture file
+        #[arg(long)]
+        fixture: std::path::PathBuf,
+
+        /// Top-K cutoff for metrics
+        #[arg(long, default_value_t = eval::DEFAULT_K)]
+        k: usize,
+    },
+
+    /// Run the fixture and diff against the most recent baseline.
+    Run {
+        /// Path to a JSONL fixture file
+        #[arg(long)]
+        fixture: std::path::PathBuf,
+
+        /// Top-K cutoff for metrics
+        #[arg(long, default_value_t = eval::DEFAULT_K)]
+        k: usize,
+
+        /// Also persist this run as a baseline alongside the diff
+        #[arg(long)]
+        save: bool,
+    },
 }
 
 #[tokio::main]
@@ -234,6 +273,15 @@ async fn main() -> Result<()> {
         Commands::Init => {
             init_project()?;
         }
+
+        Commands::Eval(args) => match args.command {
+            EvalCommand::Baseline { fixture, k } => {
+                eval::run_baseline(&fixture, k, &config).await?;
+            }
+            EvalCommand::Run { fixture, k, save } => {
+                eval::run_against_baseline(&fixture, k, save, &config).await?;
+            }
+        },
     }
 
     Ok(())

@@ -1,0 +1,32 @@
+# Tempera eval fixture — example template
+#
+# Lines starting with `#` and blank lines are ignored. Each non-comment line
+# is one JSON object describing a labeled query.
+#
+# Schema:
+#   id          : stable identifier for this query (string)
+#   query       : the query string sent to the retriever (string)
+#   relevant    : array of relevant episodes
+#                 - id    : episode ID (string, full or short prefix)
+#                 - grade : 0-3 relevance (default 3)
+#                           0 = irrelevant, 1 = partial, 2 = relevant, 3 = highly relevant
+#   project     : optional project filter (string)
+#   tags        : optional free-form labels for slicing results (array of strings)
+#   notes       : optional labeling rationale (string)
+#
+# To create your own fixture:
+#   1. Replace the example IDs below with real episode IDs from your store:
+#        tempera list --limit 50
+#   2. For each query, list the episodes you expect to be relevant
+#   3. Save to evals/fixtures/<name>.jsonl
+#   4. Establish a baseline:
+#        tempera eval baseline --fixture evals/fixtures/<name>.jsonl
+#   5. Re-run to measure changes:
+#        tempera eval run --fixture evals/fixtures/<name>.jsonl
+#
+# The examples below use placeholder IDs (REPLACE_ME_*) — they will produce
+# all-zero metrics until you swap in real episode IDs from your brain.
+
+{"id": "q001", "query": "fix login redirect vulnerability", "relevant": [{"id": "REPLACE_ME_1", "grade": 3}, {"id": "REPLACE_ME_2", "grade": 2}], "tags": ["security", "auth"], "notes": "open-redirect-class bug; expect URL validation BKMs"}
+{"id": "q002", "query": "tokio spawn_blocking deadlock", "relevant": [{"id": "REPLACE_ME_3", "grade": 3}], "tags": ["concurrency", "rust"], "notes": "literal-token query — should favor BM25 once hybrid lands"}
+{"id": "q003", "query": "how do I structure async tests", "relevant": [{"id": "REPLACE_ME_4", "grade": 3}, {"id": "REPLACE_ME_5", "grade": 1}], "tags": ["testing", "rust"], "notes": "conceptual query — should favor vector similarity"}

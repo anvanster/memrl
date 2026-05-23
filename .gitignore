@@ -31,3 +31,6 @@ Thumbs.db
 
 # Prebuilt binaries for npm distribution (built locally)
 /prebuilt/
+
+# Eval baselines are local runtime artifacts; keep the directory via .gitkeep
+/evals/baselines/*.json
