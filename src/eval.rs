@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::retrieve::try_vector_search;
+use crate::retrieve::try_search;
 
 /// Default top-K cutoff for metrics if the caller doesn't specify.
 pub const DEFAULT_K: usize = 5;
@@ -250,7 +250,7 @@ pub async fn run_eval(fixture_path: &Path, k: usize, config: &Config) -> Result<
 }
 
 async fn retrieve_ids(entry: &FixtureEntry, k: usize, config: &Config) -> Vec<String> {
-    match try_vector_search(&entry.query, k, entry.project.as_deref(), config).await {
+    match try_search(&entry.query, k, entry.project.as_deref(), config).await {
         Ok(results) => results.into_iter().map(|s| s.episode.id).collect(),
         Err(_) => Vec::new(),
     }

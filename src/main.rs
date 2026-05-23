@@ -20,6 +20,7 @@ mod episode;
 mod eval;
 mod feedback;
 mod indexer;
+mod keyword;
 mod llm;
 mod retrieve;
 mod stats;

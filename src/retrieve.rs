@@ -5,9 +5,11 @@
 use anyhow::Result;
 use chrono::Utc;
 use colored::Colorize;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::io::Write;
 
-use crate::config::Config;
+use crate::config::{Config, RetrievalMode};
 use crate::episode::{Episode, RetrievalRecord};
 use crate::indexer::EpisodeIndexer;
 use crate::store::EpisodeStore;
@@ -22,10 +24,15 @@ pub async fn run(
 ) -> Result<()> {
     let store = EpisodeStore::new()?;
 
-    // Try vector search first if index exists
-    let episodes = match try_vector_search(query, limit, project.as_deref(), config).await {
+    // Dispatch to the configured retrieval mode (hybrid/vector/keyword); fall
+    // back to text search only if all index-based paths fail.
+    let episodes = match try_search(query, limit, project.as_deref(), config).await {
         Ok(results) if !results.is_empty() => {
-            println!("🔍 Using semantic vector search...\n");
+            match config.retrieval.mode {
+                RetrievalMode::Hybrid => println!("🔍 Hybrid retrieval (vector + BM25)...\n"),
+                RetrievalMode::Vector => println!("🔍 Semantic vector search...\n"),
+                RetrievalMode::Keyword => println!("🔍 BM25 keyword search...\n"),
+            }
             results
         }
         _ => {
@@ -55,6 +62,21 @@ pub async fn run(
     record_retrievals(&episodes, query, &store)?;
 
     Ok(())
+}
+
+/// Dispatch retrieval to the configured mode. Falls back to vector-only if
+/// keyword or hybrid pipelines aren't available.
+pub async fn try_search(
+    query: &str,
+    limit: usize,
+    project_filter: Option<&str>,
+    config: &Config,
+) -> Result<Vec<ScoredEpisode>> {
+    match config.retrieval.mode {
+        RetrievalMode::Vector => try_vector_search(query, limit, project_filter, config).await,
+        RetrievalMode::Keyword => try_keyword_search(query, limit, project_filter, config).await,
+        RetrievalMode::Hybrid => try_hybrid_search(query, limit, project_filter, config).await,
+    }
 }
 
 /// Try to retrieve episodes using vector search
@@ -104,6 +126,152 @@ pub async fn try_vector_search(
     let episodes = apply_mmr(episodes, limit, config.retrieval.mmr_lambda);
 
     Ok(episodes)
+}
+
+/// Retrieve using only the BM25 keyword index. BM25 scores are normalized to
+/// `[0, 1]` (divided by the max score in the result set) so they plug into
+/// the same `combined_score` machinery as vector similarity.
+pub async fn try_keyword_search(
+    query: &str,
+    limit: usize,
+    project_filter: Option<&str>,
+    config: &Config,
+) -> Result<Vec<ScoredEpisode>> {
+    let indexer = EpisodeIndexer::new().await?;
+    if indexer.keyword_doc_count() == 0 {
+        anyhow::bail!("Keyword index is empty");
+    }
+    let store = EpisodeStore::new()?;
+
+    let hits = indexer.search_keyword(query, limit * 2, project_filter);
+    if hits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max_score = hits
+        .iter()
+        .map(|h| h.score)
+        .fold(0.0_f32, f32::max)
+        .max(1e-6);
+
+    let mut episodes: Vec<ScoredEpisode> = hits
+        .into_iter()
+        .filter_map(|hit| {
+            let episode = store.load(&hit.id).ok()?;
+            let sim = hit.score / max_score;
+            let utility = episode.utility.calculate_score();
+            let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
+            let combined = combined_score(sim, utility, recency, config);
+            Some(ScoredEpisode {
+                episode,
+                similarity_score: sim,
+                utility_score: utility,
+                combined_score: combined,
+            })
+        })
+        .collect();
+
+    episodes.sort_by(|a, b| {
+        b.combined_score
+            .partial_cmp(&a.combined_score)
+            .unwrap_or(Ordering::Equal)
+    });
+
+    // Skip min_similarity here — BM25 score thresholds aren't calibrated to
+    // the cosine threshold the user picked for vector mode.
+
+    Ok(apply_mmr(episodes, limit, config.retrieval.mmr_lambda))
+}
+
+/// Hybrid retrieval: run vector + keyword in parallel, fuse via RRF, then
+/// apply the standard `combined_score` (utility + recency) to the fused
+/// candidates. Falls back to whichever side has results if the other is
+/// empty or unavailable.
+pub async fn try_hybrid_search(
+    query: &str,
+    limit: usize,
+    project_filter: Option<&str>,
+    config: &Config,
+) -> Result<Vec<ScoredEpisode>> {
+    let indexer = EpisodeIndexer::new().await?;
+    let store = EpisodeStore::new()?;
+
+    let fetch = (limit * 4).max(20);
+
+    // Keyword search is sync over the in-memory index; vector search is async.
+    // Run them concurrently when both are available.
+    let keyword_hits = indexer.search_keyword(query, fetch, project_filter);
+    let vector_hits = if indexer.is_indexed().await {
+        indexer
+            .search(query, fetch, project_filter)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    if keyword_hits.is_empty() && vector_hits.is_empty() {
+        anyhow::bail!("No results from either retrieval path");
+    }
+
+    let keyword_ranked: Vec<String> = keyword_hits.iter().map(|h| h.id.clone()).collect();
+    let vector_ranked: Vec<String> = vector_hits.iter().map(|r| r.id.clone()).collect();
+
+    // Capture true vector similarity so we can preserve it on the returned
+    // ScoredEpisode (used by callers that filter or display sim).
+    let vector_sim: HashMap<String, f32> = vector_hits
+        .iter()
+        .map(|r| (r.id.clone(), r.similarity_score))
+        .collect();
+
+    let fused = reciprocal_rank_fusion(&[keyword_ranked, vector_ranked], config.retrieval.rrf_k);
+
+    let max_rrf = fused.first().map(|(_, s)| *s).unwrap_or(1e-6).max(1e-6);
+
+    let mut episodes: Vec<ScoredEpisode> = fused
+        .into_iter()
+        .take(fetch)
+        .filter_map(|(id, rrf_score)| {
+            let episode = store.load(&id).ok()?;
+            let sim_normalized = rrf_score / max_rrf;
+            let utility = episode.utility.calculate_score();
+            let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
+            let combined = combined_score(sim_normalized, utility, recency, config);
+            // Surface true cosine sim when this doc came through the vector
+            // path; fall back to RRF-normalized score otherwise.
+            let surface_sim = vector_sim.get(&id).copied().unwrap_or(sim_normalized);
+            Some(ScoredEpisode {
+                episode,
+                similarity_score: surface_sim,
+                utility_score: utility,
+                combined_score: combined,
+            })
+        })
+        .collect();
+
+    episodes.sort_by(|a, b| {
+        b.combined_score
+            .partial_cmp(&a.combined_score)
+            .unwrap_or(Ordering::Equal)
+    });
+
+    // min_similarity is calibrated for vector mode; hybrid mode skips it
+    // because the score distribution is different.
+
+    Ok(apply_mmr(episodes, limit, config.retrieval.mmr_lambda))
+}
+
+/// Reciprocal-rank fusion of N rankings. Each doc gets `Σ 1/(k + rank + 1)`
+/// where `rank` is its 0-indexed position in each input ranking.
+pub fn reciprocal_rank_fusion(rankings: &[Vec<String>], k: f32) -> Vec<(String, f32)> {
+    let mut scores: HashMap<String, f32> = HashMap::new();
+    for ranking in rankings {
+        for (rank, id) in ranking.iter().enumerate() {
+            *scores.entry(id.clone()).or_insert(0.0) += 1.0 / (k + rank as f32 + 1.0);
+        }
+    }
+    let mut v: Vec<(String, f32)> = scores.into_iter().collect();
+    v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+    v
 }
 
 /// Retrieve relevant episodes using text-based search (fallback)
@@ -477,5 +645,64 @@ mod tests {
             "With recency: expected ~0.717, got {}",
             score2
         );
+    }
+
+    fn ids(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn rrf_basic_two_rankings() {
+        let r1 = ids(&["a", "b", "c"]);
+        let r2 = ids(&["b", "a", "d"]);
+        let fused = reciprocal_rank_fusion(&[r1, r2], 60.0);
+        // 'a' and 'b' tie at the top; HashMap iteration order is non-deterministic
+        // so we assert the *set* of top two, not a specific ordering between ties.
+        let top_two: std::collections::HashSet<&str> = [fused[0].0.as_str(), fused[1].0.as_str()]
+            .into_iter()
+            .collect();
+        let expected: std::collections::HashSet<&str> = ["a", "b"].into_iter().collect();
+        assert_eq!(top_two, expected);
+        assert!((fused[0].1 - fused[1].1).abs() < 1e-9, "a and b should tie");
+        let a_score = fused.iter().find(|(id, _)| id == "a").unwrap().1;
+        let c_score = fused.iter().find(|(id, _)| id == "c").unwrap().1;
+        assert!(a_score > c_score, "a should outrank c");
+    }
+
+    #[test]
+    fn rrf_single_ranking_preserves_order() {
+        let r = ids(&["a", "b", "c"]);
+        let fused = reciprocal_rank_fusion(&[r], 60.0);
+        assert_eq!(fused[0].0, "a");
+        assert_eq!(fused[1].0, "b");
+        assert_eq!(fused[2].0, "c");
+    }
+
+    #[test]
+    fn rrf_empty_rankings_returns_empty() {
+        let fused = reciprocal_rank_fusion(&[], 60.0);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn rrf_higher_k_compresses_score_spread() {
+        let r = ids(&["a", "b"]);
+        let low_k = reciprocal_rank_fusion(std::slice::from_ref(&r), 10.0);
+        let high_k = reciprocal_rank_fusion(std::slice::from_ref(&r), 100.0);
+        let low_diff = low_k[0].1 - low_k[1].1;
+        let high_diff = high_k[0].1 - high_k[1].1;
+        assert!(low_diff > high_diff, "lower k should produce wider spread");
+    }
+
+    #[test]
+    fn rrf_score_decreases_with_rank() {
+        let r = ids(&["a", "b", "c", "d", "e"]);
+        let fused = reciprocal_rank_fusion(&[r], 60.0);
+        for w in fused.windows(2) {
+            assert!(
+                w[0].1 > w[1].1,
+                "scores should strictly decrease for a single ranking"
+            );
+        }
     }
 }

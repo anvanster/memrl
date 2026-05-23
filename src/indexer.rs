@@ -12,6 +12,7 @@ use vectrust::{CreateIndexConfig, DistanceMetric, LocalIndex, UpdateRequest, Vec
 
 use crate::config::Config;
 use crate::episode::Episode;
+use crate::keyword::{KeywordHit, KeywordIndex};
 use crate::store::EpisodeStore;
 
 /// Embedding dimension for BGE-Small model
@@ -22,9 +23,14 @@ const EMBEDDING_DIM: usize = 384;
 /// Uses on-demand open/close pattern: the embedder is cached (expensive to load)
 /// but the vector index is opened fresh per operation and released when done.
 /// This allows multiple MCP server instances to share the same database.
+///
+/// Also owns the in-memory BM25 keyword index (persisted to disk alongside the
+/// vector index) so hybrid retrieval can combine semantic + lexical signal.
 pub struct EpisodeIndexer {
     embedder: TextEmbedding,
     index_path: PathBuf,
+    keyword: KeywordIndex,
+    keyword_path: PathBuf,
 }
 
 impl EpisodeIndexer {
@@ -50,9 +56,14 @@ impl EpisodeIndexer {
         .context("Failed to initialize embedding model")?;
         println!("Embedding model loaded");
 
+        let keyword_path = Self::keyword_index_path()?;
+        let keyword = KeywordIndex::load(&keyword_path)?.unwrap_or_default();
+
         Ok(Self {
             embedder,
             index_path,
+            keyword,
+            keyword_path,
         })
     }
 
@@ -85,6 +96,12 @@ impl EpisodeIndexer {
     fn model_cache_path() -> Result<PathBuf> {
         let data_dir = Config::data_dir()?;
         Ok(data_dir.join("models"))
+    }
+
+    /// Get the keyword index path (~/.tempera/keyword/index.json)
+    fn keyword_index_path() -> Result<PathBuf> {
+        let data_dir = Config::data_dir()?;
+        Ok(data_dir.join("keyword").join("index.json"))
     }
 
     /// Generate embedding for text
@@ -207,10 +224,22 @@ impl EpisodeIndexer {
             .context("Failed to insert episode")?;
 
         index.end_update().await?;
+
+        // Mirror into the keyword index (insert is upsert-equivalent).
+        let kw_text = Self::episode_to_embedding_text(episode);
+        self.keyword
+            .insert(episode.id.clone(), episode.project.clone(), &kw_text);
+        self.keyword.save(&self.keyword_path)?;
+
         Ok(())
     }
 
-    /// Index all episodes from the store
+    /// Index all episodes from the store.
+    ///
+    /// The vector index supports incremental updates (embedding is expensive).
+    /// The keyword index is rebuilt from scratch every call — it's in-memory
+    /// and JSON-serialized, so the rebuild cost is negligible compared to
+    /// hunting for which episodes are missing.
     pub async fn index_all(&mut self, reindex: bool) -> Result<usize> {
         let store = EpisodeStore::new()?;
         let episodes = store.list_all()?;
@@ -269,6 +298,15 @@ impl EpisodeIndexer {
             index.end_update().await?;
             println!();
         }
+
+        // Rebuild keyword index from scratch.
+        self.keyword = KeywordIndex::new();
+        for episode in &episodes {
+            let text = Self::episode_to_embedding_text(episode);
+            self.keyword
+                .insert(episode.id.clone(), episode.project.clone(), &text);
+        }
+        self.keyword.save(&self.keyword_path)?;
 
         Ok(indexed)
     }
@@ -349,12 +387,27 @@ impl EpisodeIndexer {
 
     /// Check if the index exists and has data
     pub async fn is_indexed(&self) -> bool {
-        if let Ok(index) = self.open_index().await {
-            if let Ok(stats) = index.get_stats().await {
-                return stats.items > 0;
-            }
+        if let Ok(index) = self.open_index().await
+            && let Ok(stats) = index.get_stats().await
+        {
+            return stats.items > 0;
         }
         false
+    }
+
+    /// Search the keyword (BM25) index. Independent of the vector index.
+    pub fn search_keyword(
+        &self,
+        query: &str,
+        limit: usize,
+        project_filter: Option<&str>,
+    ) -> Vec<KeywordHit> {
+        self.keyword.search(query, limit, project_filter)
+    }
+
+    /// Number of documents in the keyword index.
+    pub fn keyword_doc_count(&self) -> usize {
+        self.keyword.doc_count()
     }
 
     /// Get index statistics

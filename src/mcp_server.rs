@@ -22,6 +22,7 @@ mod config;
 mod episode;
 mod feedback;
 mod indexer;
+mod keyword;
 mod mcp;
 mod retrieve;
 mod stats;

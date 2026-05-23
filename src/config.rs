@@ -58,10 +58,34 @@ impl Default for EmbeddingConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RetrievalMode {
+    /// Vector (semantic) search only — pre-v0.4.2 behavior.
+    Vector,
+    /// BM25 keyword search only.
+    Keyword,
+    /// Both, fused via reciprocal-rank fusion (v0.4.2+ default).
+    Hybrid,
+}
+
+impl Default for RetrievalMode {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalConfig {
     #[serde(default = "default_limit")]
     pub default_limit: usize,
+    /// Which retrieval pipeline to use. "vector" | "keyword" | "hybrid".
+    #[serde(default)]
+    pub mode: RetrievalMode,
+    /// RRF constant `k` — higher values smooth out ranking differences between
+    /// the two input rankings. Lucene/Vespa default is 60.
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f32,
     #[serde(default = "default_similarity_weight")]
     pub similarity_weight: f32,
     #[serde(default = "default_utility_weight")]
@@ -83,6 +107,8 @@ impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
             default_limit: default_limit(),
+            mode: RetrievalMode::default(),
+            rrf_k: default_rrf_k(),
             similarity_weight: default_similarity_weight(),
             utility_weight: default_utility_weight(),
             min_similarity: default_min_similarity(),
@@ -230,6 +256,10 @@ fn default_recency_halflife_days() -> f32 {
     30.0
 }
 
+fn default_rrf_k() -> f32 {
+    60.0
+}
+
 fn default_decay_rate() -> f64 {
     0.01
 }
@@ -365,6 +395,23 @@ mod tests {
         // Recency defaults
         assert_eq!(config.retrieval.recency_weight, 0.0);
         assert_eq!(config.retrieval.recency_halflife_days, 30.0);
+        // Hybrid retrieval defaults
+        assert_eq!(config.retrieval.mode, RetrievalMode::Hybrid);
+        assert_eq!(config.retrieval.rrf_k, 60.0);
+    }
+
+    #[test]
+    fn test_retrieval_mode_serialization() {
+        // Make sure lowercase tags round-trip
+        for &m in &[
+            RetrievalMode::Vector,
+            RetrievalMode::Keyword,
+            RetrievalMode::Hybrid,
+        ] {
+            let json = serde_json::to_string(&m).unwrap();
+            let parsed: RetrievalMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, m);
+        }
     }
 
     #[test]
