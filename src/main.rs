@@ -17,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
 mod backup;
 mod capture;
 mod config;
+mod contradict;
 mod doctor;
 mod dream;
 mod episode;
@@ -210,6 +211,30 @@ enum Commands {
         dry_run: bool,
 
         /// Emit the reflection record as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the contradiction probe. Pairs frequently-retrieved episodes
+    /// whose embeddings are related-but-not-duplicate and asks Haiku
+    /// to judge whether they contradict on a factual claim. Surfaces
+    /// active findings + a Wilson 95% CI on the rate.
+    Contradict {
+        /// Cap on judge calls per run. Overrides
+        /// config.dream.contradict_max_pairs.
+        #[arg(long)]
+        max_pairs: Option<usize>,
+
+        /// Plan only — show how many pairs would be sent without
+        /// making any LLM calls.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// List active (unresolved) contradictions instead of probing.
+        #[arg(long)]
+        list: bool,
+
+        /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -482,6 +507,93 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Contradict {
+            max_pairs,
+            dry_run,
+            list,
+            json,
+        } => {
+            if list {
+                let store = contradict::ContradictionStore::open_default().await?;
+                let active = store.list_active(100).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&active)?);
+                } else if active.is_empty() {
+                    println!("No active contradictions.");
+                } else {
+                    use colored::Colorize;
+                    println!();
+                    println!(
+                        "{} active contradiction(s):",
+                        active.len().to_string().bold()
+                    );
+                    for c in active.iter().take(20) {
+                        let sev_colored = match c.severity {
+                            contradict::Severity::High => c.severity.as_str().red(),
+                            contradict::Severity::Medium => c.severity.as_str().yellow(),
+                            contradict::Severity::Low => c.severity.as_str().normal(),
+                        };
+                        let a8 = &c.episode_a[..8.min(c.episode_a.len())];
+                        let b8 = &c.episode_b[..8.min(c.episode_b.len())];
+                        println!(
+                            "  [{}] {} ↔ {} (sim {:.2}, conf {:.2}): {}",
+                            sev_colored, a8, b8, c.similarity, c.confidence, c.explanation
+                        );
+                        if let Some(hint) = &c.resolution_hint {
+                            println!("    hint: {}", hint);
+                        }
+                    }
+                    println!();
+                }
+                return Ok(());
+            }
+            let mut cfg = config.clone();
+            if let Some(n) = max_pairs {
+                cfg.dream.contradict_max_pairs = n;
+            }
+            if dry_run {
+                let plan = serde_json::json!({
+                    "top_n_candidates": cfg.dream.contradict_top_n,
+                    "min_similarity": cfg.dream.contradict_min_similarity,
+                    "max_similarity": cfg.dream.contradict_max_similarity,
+                    "max_pairs": cfg.dream.contradict_max_pairs,
+                    "estimated_cost_usd_worst_case":
+                        contradict::JUDGE_ESTIMATED_COST_USD
+                            * cfg.dream.contradict_max_pairs as f32,
+                    "judge_model": &cfg.dream.triage_model,
+                });
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(());
+            }
+            let budget = dream::CostBudget::new(cfg.dream.default_max_usd);
+            let report = contradict::run_probe(&cfg, Some(&budget)).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!();
+                println!("Contradiction probe");
+                println!("  pairs evaluated:       {}", report.pairs_evaluated);
+                println!("  contradictions found:  {}", report.contradictions_found);
+                if report.pairs_evaluated > 0 {
+                    let rate = report.contradictions_found as f32 / report.pairs_evaluated as f32;
+                    println!(
+                        "  rate:                  {:.1}%  (Wilson 95% CI {:.0}% – {:.0}%)",
+                        rate * 100.0,
+                        report.rate_ci_lower * 100.0,
+                        report.rate_ci_upper * 100.0,
+                    );
+                }
+                println!(
+                    "  by severity:           high={} medium={} low={}",
+                    report.by_severity.high, report.by_severity.medium, report.by_severity.low
+                );
+                if report.small_sample {
+                    println!("  note: small sample — CI is wide; treat as directional.");
+                }
+                println!();
+            }
         }
 
         Commands::Patterns {

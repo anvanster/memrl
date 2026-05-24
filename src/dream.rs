@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::config::Config;
+use crate::contradict;
 use crate::episode::VerificationState;
 use crate::patterns;
 use crate::reflect;
@@ -49,6 +50,9 @@ pub enum PhaseName {
     /// Cluster recent reflections and author pattern pages for clusters
     /// with `>= patterns_min_evidence` members (v0.7.4+).
     Patterns,
+    /// Probe pairs of frequently-retrieved episodes for factual
+    /// contradictions (v0.7.5+). Persists findings + Wilson CI.
+    Contradict,
 }
 
 impl PhaseName {
@@ -58,6 +62,7 @@ impl PhaseName {
             Self::Decay => "decay",
             Self::Reflect => "reflect",
             Self::Patterns => "patterns",
+            Self::Contradict => "contradict",
         }
     }
 }
@@ -70,8 +75,9 @@ impl FromStr for PhaseName {
             "decay" => Self::Decay,
             "reflect" => Self::Reflect,
             "patterns" => Self::Patterns,
+            "contradict" => Self::Contradict,
             other => anyhow::bail!(
-                "unknown phase '{other}' (expected: verify_advance | decay | reflect | patterns)"
+                "unknown phase '{other}' (expected: verify_advance | decay | reflect | patterns | contradict)"
             ),
         })
     }
@@ -91,6 +97,7 @@ const FULL_CYCLE_ORDER: &[PhaseName] = &[
     PhaseName::Decay,
     PhaseName::Reflect,
     PhaseName::Patterns,
+    PhaseName::Contradict,
 ];
 
 pub fn all_phases() -> &'static [PhaseName] {
@@ -218,6 +225,12 @@ fn estimate(phase: PhaseName) -> CostEstimate {
             usd: patterns::PATTERN_ESTIMATED_COST_USD * 3.0,
             estimated_seconds: 30,
         },
+        // Contradict: up to contradict_max_pairs Haiku calls per run.
+        // Budget-conservative: assume the cap (default 30) all fire.
+        PhaseName::Contradict => CostEstimate {
+            usd: contradict::JUDGE_ESTIMATED_COST_USD * 30.0,
+            estimated_seconds: 60,
+        },
     }
 }
 
@@ -234,6 +247,7 @@ async fn dispatch(phase: PhaseName, ctx: &PhaseContext<'_>) -> Result<PhaseRepor
         }
         PhaseName::Reflect => run_reflect(ctx).await?,
         PhaseName::Patterns => run_patterns(ctx).await?,
+        PhaseName::Contradict => run_contradict(ctx).await?,
     };
     Ok(PhaseReport {
         name: phase,
@@ -506,6 +520,32 @@ async fn run_patterns(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f3
             report.patterns_written,
             report.patterns_skipped_existing,
             report.clusters_with_no_theme,
+        )
+    };
+    Ok((PhaseStatus::Ok, summary, cost_usd))
+}
+
+/// v0.7.5: probe pairs of frequently-retrieved BKM episodes for
+/// factual contradictions, surface a Wilson CI on the rate.
+async fn run_contradict(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f32)> {
+    let report = contradict::run_probe(ctx.config, Some(ctx.budget))
+        .await
+        .context("contradict phase failed")?;
+    let cost_usd = report.pairs_evaluated as f32 * contradict::JUDGE_ESTIMATED_COST_USD;
+    let summary = if report.pairs_evaluated == 0 {
+        "no eligible pairs (corpus too small or all near-duplicate)".to_string()
+    } else {
+        let rate = report.contradictions_found as f32 / report.pairs_evaluated as f32;
+        format!(
+            "{}/{} pairs contradict ({:.0}%, CI {:.0}-{:.0}%); high={} medium={} low={}",
+            report.contradictions_found,
+            report.pairs_evaluated,
+            rate * 100.0,
+            report.rate_ci_lower * 100.0,
+            report.rate_ci_upper * 100.0,
+            report.by_severity.high,
+            report.by_severity.medium,
+            report.by_severity.low,
         )
     };
     Ok((PhaseStatus::Ok, summary, cost_usd))

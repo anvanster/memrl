@@ -55,6 +55,23 @@ pub struct DreamConfig {
     /// 0.75 ≈ "clearly related theme"; lower = more permissive.
     #[serde(default = "default_patterns_cluster_threshold")]
     pub patterns_cluster_threshold: f32,
+    /// Top N most-retrieved episodes considered for contradiction
+    /// pairing (v0.7.5). Default 50.
+    #[serde(default = "default_contradict_top_n")]
+    pub contradict_top_n: usize,
+    /// Pair similarity must fall in [low, high]: too low = unrelated,
+    /// too high = near-duplicate (not actually contradictions).
+    #[serde(default = "default_contradict_min_similarity")]
+    pub contradict_min_similarity: f32,
+    #[serde(default = "default_contradict_max_similarity")]
+    pub contradict_max_similarity: f32,
+    /// Maximum number of pairs to send to the judge per run.
+    #[serde(default = "default_contradict_max_pairs")]
+    pub contradict_max_pairs: usize,
+    /// Probe is gated on the judge's self-reported confidence — verdicts
+    /// below this don't get stored (treated as ambiguous).
+    #[serde(default = "default_contradict_min_confidence")]
+    pub contradict_min_confidence: f32,
 }
 
 impl Default for DreamConfig {
@@ -68,6 +85,11 @@ impl Default for DreamConfig {
             patterns_lookback_days: default_patterns_lookback_days(),
             patterns_min_evidence: default_patterns_min_evidence(),
             patterns_cluster_threshold: default_patterns_cluster_threshold(),
+            contradict_top_n: default_contradict_top_n(),
+            contradict_min_similarity: default_contradict_min_similarity(),
+            contradict_max_similarity: default_contradict_max_similarity(),
+            contradict_max_pairs: default_contradict_max_pairs(),
+            contradict_min_confidence: default_contradict_min_confidence(),
         }
     }
 }
@@ -395,6 +417,26 @@ fn default_patterns_min_evidence() -> usize {
 
 fn default_patterns_cluster_threshold() -> f32 {
     0.75
+}
+
+fn default_contradict_top_n() -> usize {
+    50
+}
+
+fn default_contradict_min_similarity() -> f32 {
+    0.6
+}
+
+fn default_contradict_max_similarity() -> f32 {
+    0.95
+}
+
+fn default_contradict_max_pairs() -> usize {
+    30
+}
+
+fn default_contradict_min_confidence() -> f32 {
+    0.7
 }
 
 fn default_consolidation_threshold() -> f32 {
