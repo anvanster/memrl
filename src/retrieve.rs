@@ -227,15 +227,23 @@ pub async fn try_hybrid_search(
 
     let max_rrf = fused.first().map(|(_, s)| *s).unwrap_or(1e-6).max(1e-6);
 
+    let sim_w = config.retrieval.hybrid_similarity_weight;
+    let util_w = config.retrieval.hybrid_utility_weight;
+    let total_w = (sim_w + util_w).max(f32::EPSILON);
+
     let mut episodes: Vec<ScoredEpisode> = fused
         .into_iter()
         .take(fetch)
         .filter_map(|(id, rrf_score)| {
             let episode = store.load(&id).ok()?;
+            // Normalize RRF to [0, 1] within this result set.
             let sim_normalized = rrf_score / max_rrf;
             let utility = episode.utility.calculate_score();
-            let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
-            let combined = combined_score(sim_normalized, utility, recency, config);
+            // Hybrid-specific blend: RRF dominates (its rank carries both
+            // lexical and semantic signal), utility is a smaller reweight.
+            // Recency is intentionally omitted here — opt in via config if
+            // you want it back in hybrid ranking.
+            let combined = (sim_w * sim_normalized + util_w * utility) / total_w;
             // Surface true cosine sim when this doc came through the vector
             // path; fall back to RRF-normalized score otherwise.
             let surface_sim = vector_sim.get(&id).copied().unwrap_or(sim_normalized);

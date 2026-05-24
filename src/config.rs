@@ -86,6 +86,14 @@ pub struct RetrievalConfig {
     /// the two input rankings. Lucene/Vespa default is 60.
     #[serde(default = "default_rrf_k")]
     pub rrf_k: f32,
+    /// In hybrid mode, the RRF-normalized score replaces cosine similarity in
+    /// the ranking blend. Its distribution is compressed (top doc = 1.0,
+    /// second often ≈ 0.5), so the vector-mode weights would let utility
+    /// dominate. Use a more similarity-biased default here.
+    #[serde(default = "default_hybrid_similarity_weight")]
+    pub hybrid_similarity_weight: f32,
+    #[serde(default = "default_hybrid_utility_weight")]
+    pub hybrid_utility_weight: f32,
     #[serde(default = "default_similarity_weight")]
     pub similarity_weight: f32,
     #[serde(default = "default_utility_weight")]
@@ -109,6 +117,8 @@ impl Default for RetrievalConfig {
             default_limit: default_limit(),
             mode: RetrievalMode::default(),
             rrf_k: default_rrf_k(),
+            hybrid_similarity_weight: default_hybrid_similarity_weight(),
+            hybrid_utility_weight: default_hybrid_utility_weight(),
             similarity_weight: default_similarity_weight(),
             utility_weight: default_utility_weight(),
             min_similarity: default_min_similarity(),
@@ -258,6 +268,14 @@ fn default_recency_halflife_days() -> f32 {
 
 fn default_rrf_k() -> f32 {
     60.0
+}
+
+fn default_hybrid_similarity_weight() -> f32 {
+    0.85
+}
+
+fn default_hybrid_utility_weight() -> f32 {
+    0.15
 }
 
 fn default_decay_rate() -> f64 {
