@@ -3,12 +3,27 @@
 
 #![allow(dead_code)]
 
+use anyhow::{Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+/// Current on-disk schema version for `Episode`. Bump when adding fields that
+/// cannot be filled by serde defaults — then add a `migrate_v{n}_to_v{n+1}`
+/// arm in `Episode::migrate`. See the v0.5.4 roadmap entry.
+pub const CURRENT_EPISODE_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    // Old episodes on disk pre-date the schema_version field. They are
+    // implicitly v1 — the shape that has been stable since v0.4.0.
+    1
+}
 
 /// A coding episode - a single session of work
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Episode {
+    /// Schema version. Added in v0.4.5. Missing on older files → defaults to 1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub timestamp_start: DateTime<Utc>,
     pub timestamp_end: DateTime<Utc>,
@@ -25,6 +40,37 @@ pub struct Episode {
     /// Explicit links to related episodes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_episodes: Vec<RelatedEpisode>,
+}
+
+impl Episode {
+    /// Walk this episode forward through the migration chain to
+    /// `CURRENT_EPISODE_VERSION`. Idempotent — already-current episodes
+    /// pass through unchanged. Each `v_n → v_{n+1}` step is its own match arm.
+    ///
+    /// Episodes from a *future* version (downgrade scenario) bail; the safer
+    /// failure mode is "refuse to load" rather than "drop fields silently".
+    pub fn migrate(self) -> Result<Self> {
+        // No real upgrade paths exist yet — every episode on disk is already
+        // v1. When CURRENT_EPISODE_VERSION bumps to 2, restore the
+        // `while self.schema_version < CURRENT_EPISODE_VERSION { ... }` loop
+        // with a `1 => migrate_v1_to_v2(self)?` arm. Until then there's
+        // nothing to walk forward.
+        if self.schema_version < CURRENT_EPISODE_VERSION {
+            bail!(
+                "no migration from episode schema v{} to v{}",
+                self.schema_version,
+                CURRENT_EPISODE_VERSION
+            );
+        }
+        if self.schema_version > CURRENT_EPISODE_VERSION {
+            bail!(
+                "episode schema_version {} is newer than this binary supports (v{}); refusing to load",
+                self.schema_version,
+                CURRENT_EPISODE_VERSION
+            );
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +227,7 @@ pub enum EpisodeRelation {
 impl Episode {
     pub fn new(project: String, raw_prompt: String) -> Self {
         Self {
+            schema_version: CURRENT_EPISODE_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
             timestamp_start: Utc::now(),
             timestamp_end: Utc::now(),
@@ -459,6 +506,46 @@ mod tests {
         assert!(ep.session_id.is_none());
         assert!(ep.related_episodes.is_empty());
         assert!(ep.retrieval_history.is_empty());
+        // Older files lack `schema_version`; serde default puts them at v1.
+        assert_eq!(ep.schema_version, 1);
+    }
+
+    #[test]
+    fn migrate_passthroughs_current_version() {
+        let ep = Episode::new("p".to_string(), "test".to_string());
+        assert_eq!(ep.schema_version, CURRENT_EPISODE_VERSION);
+        let migrated = ep.clone().migrate().unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
+    }
+
+    #[test]
+    fn migrate_bails_on_future_version() {
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.schema_version = CURRENT_EPISODE_VERSION + 1;
+        let err = ep.migrate().unwrap_err();
+        assert!(
+            err.to_string().contains("newer than this binary supports"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn new_episode_has_current_schema_version() {
+        let ep = Episode::new("p".to_string(), "test".to_string());
+        assert_eq!(ep.schema_version, CURRENT_EPISODE_VERSION);
+    }
+
+    #[test]
+    fn schema_version_roundtrips_through_serde() {
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.schema_version = 1;
+        let json = serde_json::to_string(&ep).unwrap();
+        assert!(
+            json.contains("\"schema_version\":1"),
+            "schema_version not in output: {json}"
+        );
+        let parsed: Episode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.schema_version, 1);
     }
 
     #[test]

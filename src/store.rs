@@ -70,7 +70,7 @@ impl EpisodeStore {
                 if json_path.exists() {
                     let content = std::fs::read_to_string(&json_path)?;
                     let episode: Episode = serde_json::from_str(&content)?;
-                    return Ok(episode);
+                    return episode.migrate();
                 }
             }
         }
@@ -104,10 +104,11 @@ impl EpisodeStore {
                     for file in files.flatten() {
                         let path = file.path();
                         if path.extension().map_or(false, |e| e == "json") {
-                            if let Ok(content) = std::fs::read_to_string(&path) {
-                                if let Ok(episode) = serde_json::from_str::<Episode>(&content) {
-                                    episodes.push(episode);
-                                }
+                            if let Ok(content) = std::fs::read_to_string(&path)
+                                && let Ok(episode) = serde_json::from_str::<Episode>(&content)
+                                && let Ok(migrated) = episode.migrate()
+                            {
+                                episodes.push(migrated);
                             }
                         }
                     }
