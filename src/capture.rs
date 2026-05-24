@@ -312,6 +312,8 @@ async fn apply_intent_extraction(
                 episode.intent.extracted_intent = analysis.summary;
                 episode.intent.task_type = analysis.task_type;
                 episode.intent.domain = analysis.tags;
+                // v0.6.2: piggyback the falsifiability assessment.
+                episode.intent.claim = analysis.claim;
                 if !analysis.files_modified.is_empty() {
                     episode
                         .context
@@ -335,6 +337,7 @@ async fn apply_intent_extraction(
                 episode.intent.extracted_intent = extract_intent_simple(raw_prompt);
                 episode.intent.task_type = classify_task_type(raw_prompt);
                 episode.intent.domain = extract_domain_tags(raw_prompt, &episode.context);
+                // No LLM → no claim; field stays None.
             }
         }
     } else {
@@ -500,7 +503,8 @@ async fn extract_intent_with_llm(
         // Just analyze the prompt
         let intent = client.extract_intent(prompt).await?;
 
-        // Convert ExtractedIntent to SessionAnalysis
+        // Convert ExtractedIntent to SessionAnalysis, preserving the
+        // falsifiability claim (v0.6.2).
         Ok(SessionAnalysis {
             summary: intent.summary,
             task_type: intent.task_type,
@@ -509,6 +513,7 @@ async fn extract_intent_with_llm(
             files_modified: vec![],
             errors_resolved: vec![],
             key_learnings: vec![],
+            claim: intent.claim,
         })
     }
 }

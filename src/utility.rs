@@ -25,6 +25,12 @@ pub struct UtilityParams {
     pub propagation_threshold: f32,
     /// Maximum propagation depth (hops)
     pub max_propagation_depth: u32,
+    /// v0.6.2: only episodes whose Claim has `falsifiability >=` this are
+    /// allowed to seed propagation.
+    pub min_falsifiability: f32,
+    /// If true, episodes without any Claim (older / non-LLM captures) are
+    /// also excluded from propagation. Default false → lenient.
+    pub require_claim_for_propagation: bool,
 }
 
 impl Default for UtilityParams {
@@ -35,6 +41,8 @@ impl Default for UtilityParams {
             learning_rate: 0.1,         // Conservative updates
             propagation_threshold: 0.5, // 50% similarity minimum
             max_propagation_depth: 2,   // 2-hop propagation
+            min_falsifiability: 0.7,
+            require_claim_for_propagation: false,
         }
     }
 }
@@ -48,7 +56,19 @@ impl UtilityParams {
             learning_rate: config.bellman.alpha as f64,
             propagation_threshold: config.bellman.propagation_threshold,
             max_propagation_depth: config.bellman.max_propagation_depth,
+            min_falsifiability: config.bellman.min_falsifiability,
+            require_claim_for_propagation: config.bellman.require_claim_for_propagation,
         }
+    }
+}
+
+/// True when `episode` is allowed to seed Bellman propagation per v0.6.2
+/// gating rules. Encapsulated so the same predicate can be applied across
+/// future propagation paths (temporal credit, multi-hop, dream cycle).
+pub fn episode_can_propagate(episode: &Episode, params: &UtilityParams) -> bool {
+    match &episode.intent.claim {
+        Some(c) => c.falsifiability >= params.min_falsifiability,
+        None => !params.require_claim_for_propagation,
     }
 }
 
@@ -210,6 +230,10 @@ pub async fn run_bellman_propagation(
         all_episodes
     };
 
+    // v0.6.2: gate sources by Claim falsifiability so logistics-only
+    // episodes don't shape the BKM lane. `episode_can_propagate` handles
+    // the lenient-vs-strict default for episodes lacking a Claim.
+    let mut filtered_for_claim = 0_usize;
     let mut source_ids: std::collections::HashSet<String> = episodes
         .iter()
         .filter(|ep| {
@@ -220,8 +244,22 @@ pub async fn run_bellman_propagation(
             };
             ratio > 0.5 && ep.utility.retrieval_count >= 2
         })
+        .filter(|ep| {
+            let ok = episode_can_propagate(ep, params);
+            if !ok {
+                filtered_for_claim += 1;
+            }
+            ok
+        })
         .map(|ep| ep.id.clone())
         .collect();
+    if filtered_for_claim > 0 {
+        println!(
+            "    Gated {filtered_for_claim} otherwise-high-utility episode(s) — \
+             claim.falsifiability < {:.2} or absent",
+            params.min_falsifiability
+        );
+    }
 
     if source_ids.is_empty() {
         return Ok(BellmanResult {
@@ -664,5 +702,43 @@ mod tests {
         // After 100 days
         let decay_factor_100 = (1.0 - params.decay_rate).powf(100.0);
         assert!(decay_factor_100 < decay_factor);
+    }
+
+    #[test]
+    fn episode_can_propagate_lenient_default() {
+        // No claim, require_claim=false (default) ⇒ allowed.
+        let ep = Episode::new("p".into(), "test".into());
+        let params = UtilityParams::default();
+        assert!(episode_can_propagate(&ep, &params));
+    }
+
+    #[test]
+    fn episode_can_propagate_blocks_no_claim_when_strict() {
+        let ep = Episode::new("p".into(), "test".into());
+        let mut params = UtilityParams::default();
+        params.require_claim_for_propagation = true;
+        assert!(!episode_can_propagate(&ep, &params));
+    }
+
+    #[test]
+    fn episode_can_propagate_threshold_gates_low_falsifiability() {
+        let mut ep = Episode::new("p".into(), "test".into());
+        ep.intent.claim = Some(crate::episode::Claim {
+            falsifiability: 0.5,
+            category: crate::episode::ClaimCategory::Logistics,
+        });
+        let params = UtilityParams::default(); // threshold 0.7
+        assert!(!episode_can_propagate(&ep, &params));
+    }
+
+    #[test]
+    fn episode_can_propagate_threshold_admits_high_falsifiability() {
+        let mut ep = Episode::new("p".into(), "test".into());
+        ep.intent.claim = Some(crate::episode::Claim {
+            falsifiability: 0.9,
+            category: crate::episode::ClaimCategory::ApiContract,
+        });
+        let params = UtilityParams::default();
+        assert!(episode_can_propagate(&ep, &params));
     }
 }

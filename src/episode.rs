@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 /// History:
 ///   v1 — initial stable shape from v0.4.0.
 ///   v2 — added `Outcome.verification` (v0.6.1).
-pub const CURRENT_EPISODE_VERSION: u32 = 2;
+///   v3 — added `Intent.claim` (falsifiability + category) (v0.6.2).
+pub const CURRENT_EPISODE_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     // Old episodes on disk pre-date the schema_version field. They are
@@ -57,6 +58,7 @@ impl Episode {
         while self.schema_version < CURRENT_EPISODE_VERSION {
             self = match self.schema_version {
                 1 => migrate_v1_to_v2(self)?,
+                2 => migrate_v2_to_v3(self)?,
                 v => bail!(
                     "no migration from episode schema v{v} to v{}",
                     CURRENT_EPISODE_VERSION
@@ -88,6 +90,14 @@ fn migrate_v1_to_v2(mut ep: Episode) -> Result<Episode> {
     Ok(ep)
 }
 
+/// v2 → v3: added `Intent.claim`. Field is `Option<Claim>`; serde default
+/// puts old episodes at `None` (unscored). The LLM extract path on capture
+/// fills it for new episodes. Migration is a version bump.
+fn migrate_v2_to_v3(mut ep: Episode) -> Result<Episode> {
+    ep.schema_version = 3;
+    Ok(ep)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
     /// The raw first prompt from the user
@@ -98,6 +108,63 @@ pub struct Intent {
     pub task_type: TaskType,
     /// Domain tags
     pub domain: Vec<String>,
+    /// Falsifiability assessment from the LLM-extract step.
+    /// Added in episode schema v3 (v0.6.2). `None` for older episodes and
+    /// for captures that skipped LLM extraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Claim>,
+}
+
+/// Captures the *kind* of statement an episode is making and how testable it
+/// is. Episodes with `falsifiability >= 0.7` enter the BKM lane —
+/// they propagate utility through the similarity graph and get promoted by
+/// `tempera_review`. Logistics records and pure observations stay searchable
+/// but don't shape the ranking surface.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Claim {
+    /// 0.0 = logistics / unfalsifiable; 1.0 = specific, testable assertion.
+    /// See the prompt in `llm.rs` for the calibration scale.
+    pub falsifiability: f32,
+    pub category: ClaimCategory,
+    // validity_scope: Option<ValidityScope>,  // ships in v0.6.4
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimCategory {
+    /// "function X returns Y under Z" — checkable against the codebase
+    ApiContract,
+    /// "approach A is faster than B" — measurable
+    Performance,
+    /// "module M is organized as X" — verifiable by inspection
+    Structural,
+    /// "team prefers X over Y in this project" — convention, partially verifiable
+    Conventional,
+    /// "this fix works around bug #N in crate@version" — expires with the dep
+    Workaround,
+    /// "ran the migration", "bumped a version" — actions, not claims
+    Logistics,
+    Other,
+}
+
+impl ClaimCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ApiContract => "api_contract",
+            Self::Performance => "performance",
+            Self::Structural => "structural",
+            Self::Conventional => "conventional",
+            Self::Workaround => "workaround",
+            Self::Logistics => "logistics",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for ClaimCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -332,6 +399,7 @@ impl Episode {
                 extracted_intent: String::new(),
                 task_type: TaskType::Unknown,
                 domain: vec![],
+                claim: None,
             },
             context: Context {
                 files_read: vec![],
@@ -606,10 +674,12 @@ mod tests {
         assert_eq!(ep.schema_version, 1);
         // serde default also populates verification → Untested.
         assert_eq!(ep.outcome.verification, VerificationState::Untested);
-        // migrate() walks v1 → v2 without losing fields.
+        // migrate() walks v1 forward to the current version without losing fields.
         let migrated = ep.migrate().unwrap();
-        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
         assert_eq!(migrated.outcome.verification, VerificationState::Untested);
+        // v3 added Intent.claim with default None — no LLM extract was applied.
+        assert!(migrated.intent.claim.is_none());
     }
 
     #[test]
@@ -719,6 +789,72 @@ mod tests {
         ep.schema_version = 1;
         let migrated = ep.migrate().unwrap();
         assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
+    }
+
+    #[test]
+    fn migrate_v2_episode_advances_to_v3_keeping_verification() {
+        // An episode at v2 should reach v3 without losing the v2 field.
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.schema_version = 2;
+        ep.outcome.verification = VerificationState::Merged {
+            commit: "abc".to_string(),
+            at: Utc::now(),
+        };
+        let migrated = ep.migrate().unwrap();
+        assert_eq!(migrated.schema_version, 3);
+        assert!(matches!(
+            migrated.outcome.verification,
+            VerificationState::Merged { .. }
+        ));
+        // The new field defaults to None — no LLM-extracted claim yet.
+        assert!(migrated.intent.claim.is_none());
+    }
+
+    #[test]
+    fn claim_roundtrips_through_serde() {
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.intent.claim = Some(Claim {
+            falsifiability: 0.85,
+            category: ClaimCategory::ApiContract,
+        });
+        let json = serde_json::to_string(&ep).unwrap();
+        // skip_serializing_if drops None claims; this one should serialize.
+        assert!(json.contains("\"claim\""), "claim missing in JSON: {json}");
+        assert!(json.contains("\"falsifiability\":0.85"));
+        assert!(json.contains("\"category\":\"api_contract\""));
+        let parsed: Episode = serde_json::from_str(&json).unwrap();
+        let parsed_claim = parsed.intent.claim.expect("claim present");
+        assert!((parsed_claim.falsifiability - 0.85).abs() < 1e-6);
+        assert_eq!(parsed_claim.category, ClaimCategory::ApiContract);
+    }
+
+    #[test]
+    fn claim_absent_when_none() {
+        // Confirm skip_serializing_if removes the field for backwards compat.
+        let ep = Episode::new("p".to_string(), "test".to_string());
+        assert!(ep.intent.claim.is_none());
+        let json = serde_json::to_string(&ep).unwrap();
+        assert!(
+            !json.contains("\"claim\""),
+            "claim should be absent: {json}"
+        );
+    }
+
+    #[test]
+    fn claim_category_serde_snake_case() {
+        for cat in &[
+            ClaimCategory::ApiContract,
+            ClaimCategory::Performance,
+            ClaimCategory::Structural,
+            ClaimCategory::Conventional,
+            ClaimCategory::Workaround,
+            ClaimCategory::Logistics,
+            ClaimCategory::Other,
+        ] {
+            let json = serde_json::to_string(cat).unwrap();
+            let parsed: ClaimCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, *cat, "roundtrip failed for {}", cat.label());
+        }
     }
 
     #[test]

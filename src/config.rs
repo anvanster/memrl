@@ -149,6 +149,17 @@ pub struct BellmanConfig {
     /// Temporal credit lookback window in hours
     #[serde(default = "default_temporal_credit_window_hours")]
     pub temporal_credit_window_hours: i64,
+    /// v0.6.2: only episodes whose Claim has `falsifiability >= this` may
+    /// propagate utility through the similarity graph. Episodes below the
+    /// threshold are still stored and retrievable — they just don't shape
+    /// the ranking surface for their neighbors.
+    #[serde(default = "default_min_falsifiability")]
+    pub min_falsifiability: f32,
+    /// If true, episodes without any Claim at all (older files, or captures
+    /// where LLM extraction was skipped) are also excluded from propagation.
+    /// Default `false` is lenient — pre-v0.6.2 episodes keep working.
+    #[serde(default)]
+    pub require_claim_for_propagation: bool,
 }
 
 impl Default for BellmanConfig {
@@ -161,6 +172,8 @@ impl Default for BellmanConfig {
             propagation_threshold: default_propagation_threshold(),
             max_propagation_depth: default_max_propagation_depth(),
             temporal_credit_window_hours: default_temporal_credit_window_hours(),
+            min_falsifiability: default_min_falsifiability(),
+            require_claim_for_propagation: false,
         }
     }
 }
@@ -292,6 +305,10 @@ fn default_max_propagation_depth() -> u32 {
 
 fn default_temporal_credit_window_hours() -> i64 {
     1
+}
+
+fn default_min_falsifiability() -> f32 {
+    0.7
 }
 
 fn default_consolidation_threshold() -> f32 {

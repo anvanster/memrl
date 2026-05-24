@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::episode::TaskType;
+use crate::episode::{Claim, ClaimCategory, TaskType};
 
 /// Anthropic API client
 pub struct AnthropicClient {
@@ -31,6 +31,11 @@ pub struct ExtractedIntent {
     pub entities: Vec<String>,
     /// Estimated complexity (1-5)
     pub complexity: u8,
+    /// Falsifiability + category, piggybacked in the same extract call so
+    /// we don't pay a second round trip. `None` if the LLM declined to
+    /// produce them (older deployments, parse failure on those fields).
+    /// Added in v0.6.2.
+    pub claim: Option<Claim>,
 }
 
 /// Message for Anthropic API
@@ -91,6 +96,16 @@ Respond with a JSON object containing:
 - tags: Array of relevant domain tags (e.g., "authentication", "database", "frontend", "api")
 - entities: Key entities mentioned (files, functions, concepts, technologies)
 - complexity: Estimated complexity from 1 (trivial) to 5 (very complex)
+- falsifiability: 0.0 to 1.0 — can the central claim of this episode be checked
+  against future reality or future code?
+    1.0 = specific, testable assertion ("function X always returns Y when Z",
+          "approach A is faster than B")
+    0.7 = strong directional claim with concrete shape
+    0.5 = soft pattern ("usually", "tends to")
+    0.0 = pure logistics ("bumped version", "ran migration", "added comment")
+- claim_category: one of
+    api_contract | performance | structural | conventional |
+    workaround | logistics | other
 
 Respond ONLY with valid JSON, no other text."#;
 
@@ -156,6 +171,7 @@ Respond ONLY with valid JSON, no other text."#;
                 })
                 .unwrap_or_default(),
             complexity: parsed["complexity"].as_u64().unwrap_or(3) as u8,
+            claim: parse_claim(&parsed),
         })
     }
 
@@ -172,6 +188,15 @@ Respond with a JSON object containing:
 - files_modified: Array of files that were modified (based on context)
 - errors_resolved: Array of objects with "error" and "resolution" fields for any errors that were fixed
 - key_learnings: Array of important insights or patterns from the session
+- falsifiability: 0.0 to 1.0 — can the *central insight* of this session be
+  checked against future reality or future code?
+    1.0 = specific, testable assertion ("function X always returns Y when Z")
+    0.7 = strong directional claim with concrete shape
+    0.5 = soft pattern ("usually", "tends to")
+    0.0 = pure logistics ("bumped version", "ran migration", "added comment")
+- claim_category: one of
+    api_contract | performance | structural | conventional |
+    workaround | logistics | other
 
 Respond ONLY with valid JSON, no other text."#;
 
@@ -268,6 +293,7 @@ Respond ONLY with valid JSON, no other text."#;
                         .collect()
                 })
                 .unwrap_or_default(),
+            claim: parse_claim(&parsed),
         })
     }
 }
@@ -282,6 +308,10 @@ pub struct SessionAnalysis {
     pub files_modified: Vec<String>,
     pub errors_resolved: Vec<ErrorResolution>,
     pub key_learnings: Vec<String>,
+    /// Falsifiability + category for the session's central claim. Added in v0.6.2.
+    /// `None` when the LLM omits the fields.
+    #[serde(default)]
+    pub claim: Option<Claim>,
 }
 
 /// Error resolution pair
@@ -314,6 +344,34 @@ fn parse_outcome(s: &str) -> crate::episode::OutcomeStatus {
         "failure" | "failed" => crate::episode::OutcomeStatus::Failure,
         _ => crate::episode::OutcomeStatus::Partial,
     }
+}
+
+fn parse_claim_category(s: &str) -> ClaimCategory {
+    match s.to_lowercase().replace('-', "_").as_str() {
+        "api_contract" => ClaimCategory::ApiContract,
+        "performance" | "perf" => ClaimCategory::Performance,
+        "structural" => ClaimCategory::Structural,
+        "conventional" | "convention" => ClaimCategory::Conventional,
+        "workaround" => ClaimCategory::Workaround,
+        "logistics" => ClaimCategory::Logistics,
+        _ => ClaimCategory::Other,
+    }
+}
+
+/// Extract `claim` from the JSON response. Returns `None` when the LLM
+/// didn't produce either field (older deployments, partial outputs) — the
+/// rest of `ExtractedIntent` still loads.
+fn parse_claim(parsed: &serde_json::Value) -> Option<Claim> {
+    let falsifiability = parsed.get("falsifiability").and_then(|v| v.as_f64())?;
+    let category = parsed
+        .get("claim_category")
+        .and_then(|v| v.as_str())
+        .map(parse_claim_category)
+        .unwrap_or(ClaimCategory::Other);
+    Some(Claim {
+        falsifiability: (falsifiability as f32).clamp(0.0, 1.0),
+        category,
+    })
 }
 
 #[cfg(test)]
