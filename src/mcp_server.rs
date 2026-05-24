@@ -21,6 +21,7 @@ use std::io::{self, BufRead, Write};
 mod config;
 mod episode;
 mod feedback;
+mod fingerprint;
 mod indexer;
 mod keyword;
 mod mcp;

@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 use crate::mcp::helpers::{extract_project, extract_string_array};
-use crate::{config, episode, indexer, store, utility};
+use crate::{config, episode, fingerprint, indexer, store, utility};
 
 /// Capture a new episode, consolidating with existing BKMs when similar
 pub(crate) async fn handle(args: &Value) -> Result<String, String> {
@@ -148,6 +148,12 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         output.push_str(&format!("- Session: {}\n", &sid[..8]));
     }
 
+    // v0.6.5: fingerprint each error and surface prior occurrences.
+    // Best-effort — fingerprint store failures don't fail the capture.
+    if let Some(msg) = fingerprint_block(&ep, &store).await {
+        output.push_str(&msg);
+    }
+
     // Auto-propagate utility to spread value
     output.push_str("\n📈 Running auto-propagation...\n");
     let cfg = config::Config::load().unwrap_or_default();
@@ -278,6 +284,12 @@ async fn try_consolidate(
         existing.outcome.status,
         existing.intent.domain.join(", ")
     );
+
+    // v0.6.5: also fingerprint on consolidation. New errors merged into
+    // the existing BKM get hashed; matches against OTHER episodes surface.
+    if let Some(msg) = fingerprint_block(&existing, store).await {
+        output.push_str(&msg);
+    }
 
     output
         .push_str("\nExisting episode refined with new insights instead of creating a duplicate.");
@@ -504,6 +516,75 @@ pub(crate) fn parse_validity_scope(args: &Value) -> Option<episode::ValidityScop
                 })
         }
         _ => None,
+    }
+}
+
+/// v0.6.5: hash each error in `ep`, upsert into the fingerprint store, and
+/// look up matches in other episodes. Returns a markdown block to append
+/// to the capture response — or `None` if the episode has no errors or
+/// the store can't be opened (best-effort: never fails the capture).
+async fn fingerprint_block(ep: &episode::Episode, store: &store::EpisodeStore) -> Option<String> {
+    if ep.context.errors_encountered.is_empty() {
+        return None;
+    }
+    let fp_store = fingerprint::FingerprintStore::open_default().await.ok()?;
+
+    let mut block = String::new();
+    for err in &ep.context.errors_encountered {
+        let hash = fingerprint::fingerprint_error(err);
+        if fp_store.record(&hash, &ep.id).await.is_err() {
+            continue;
+        }
+        let matches = fp_store.matches(&hash, &ep.id).await.ok()?;
+        if matches.is_empty() {
+            continue;
+        }
+
+        // Only emit the header once per capture, lazily.
+        if block.is_empty() {
+            block.push_str("\n🔍 Error fingerprint(s) match prior episodes:\n");
+        }
+        let preview: String = err
+            .message
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        block.push_str(&format!(
+            "  - \"{}…\" seen in {} other episode(s)\n",
+            preview,
+            matches.len()
+        ));
+        for m in matches.iter().take(3) {
+            let resolution = store.load(&m.episode_id).ok().and_then(|other| {
+                other
+                    .context
+                    .errors_encountered
+                    .iter()
+                    .find_map(|e| e.resolution.clone())
+            });
+            let resolution_part = resolution
+                .map(|r| format!(" — \"{}\"", truncate_chars(&r, 80)))
+                .unwrap_or_default();
+            block.push_str(&format!(
+                "    · {}{}\n",
+                &m.episode_id[..8.min(m.episode_id.len())],
+                resolution_part
+            ));
+        }
+    }
+    if block.is_empty() { None } else { Some(block) }
+}
+
+fn truncate_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(n).collect();
+        out.push('…');
+        out
     }
 }
 

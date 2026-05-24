@@ -21,6 +21,7 @@ mod doctor;
 mod episode;
 mod eval;
 mod feedback;
+mod fingerprint;
 mod indexer;
 mod jobs;
 mod keyword;
