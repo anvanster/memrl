@@ -149,6 +149,38 @@ pub async fn run_propagation(config: &Config) -> Result<PropagationResult> {
     Ok(result)
 }
 
+/// Decay-only entrypoint for `tempera dream`'s decay phase.
+///
+/// Runs the same scope-aware decay as `run_propagation`'s step 1, then
+/// persists updated utility scores. Skips Bellman propagation, temporal
+/// credit, and the post-step vector-index sync so a dream cycle can apply
+/// decay cheaply without re-doing expensive work.
+pub async fn run_decay_only(config: &Config) -> Result<PropagationResult> {
+    let store = EpisodeStore::new()?;
+    let params = UtilityParams::from_config(config);
+    let mut result = PropagationResult {
+        episodes_processed: 0,
+        episodes_updated: 0,
+        total_utility_change: 0.0,
+        decayed_episodes: 0,
+        propagated_episodes: 0,
+        hops_executed: 0,
+        converged: false,
+    };
+
+    let episodes = store.list_all()?;
+    result.episodes_processed = episodes.len();
+    if episodes.is_empty() {
+        return Ok(result);
+    }
+
+    let (decayed, change) = apply_utility_decay(&store, &episodes, &params)?;
+    result.decayed_episodes = decayed;
+    result.total_utility_change = change;
+    result.episodes_updated = save_utility_updates(&store)?;
+    Ok(result)
+}
+
 /// Apply time-based utility decay to episodes
 fn apply_utility_decay(
     store: &EpisodeStore,

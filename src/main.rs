@@ -18,6 +18,7 @@ mod backup;
 mod capture;
 mod config;
 mod doctor;
+mod dream;
 mod episode;
 mod eval;
 mod feedback;
@@ -183,6 +184,32 @@ enum Commands {
     /// Read-only health check (index, coverage, links, eval, queue)
     Doctor {
         /// Emit machine-readable JSON instead of the colored summary
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the dream cycle (v0.7+ orchestrator of background phases).
+    /// v0.7.1 ships verify_advance + decay. More phases land in
+    /// subsequent point releases (reflect, patterns, contradict, embed).
+    Dream {
+        /// Run a single phase instead of the full cycle. Try
+        /// `tempera dream --list` to see available phases.
+        #[arg(long)]
+        phase: Option<String>,
+
+        /// Plan only — print what would run + estimated cost, don't execute.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Dollar cap for this run. Overrides config.dream.default_max_usd.
+        #[arg(long)]
+        max_usd: Option<f32>,
+
+        /// List available phases and exit.
+        #[arg(long)]
+        list: bool,
+
+        /// Emit a JSON report instead of the human summary.
         #[arg(long)]
         json: bool,
     },
@@ -393,6 +420,40 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Dream {
+            phase,
+            dry_run,
+            max_usd,
+            list,
+            json,
+        } => {
+            if list {
+                println!("Available phases:");
+                for p in dream::all_phases() {
+                    println!("  {}", p.as_str());
+                }
+                return Ok(());
+            }
+            let max_usd = max_usd.unwrap_or(config.dream.default_max_usd);
+            let report = if let Some(name) = phase {
+                let p: dream::PhaseName = name.parse()?;
+                if dry_run {
+                    dream::plan(&[p], max_usd)
+                } else {
+                    dream::run_one(p, &config, max_usd).await?
+                }
+            } else if dry_run {
+                dream::plan(dream::all_phases(), max_usd)
+            } else {
+                dream::run_cycle(&config, max_usd).await?
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                dream::print_cycle(&report, dry_run);
+            }
         }
 
         Commands::AdvanceVerification {

@@ -19,6 +19,33 @@ pub struct Config {
     pub bellman: BellmanConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub dream: DreamConfig,
+}
+
+/// Settings for the v0.7+ dream cycle. v0.7.1 only exposes the
+/// stability-window threshold; later releases add cost caps,
+/// per-phase enable flags, and triage settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamConfig {
+    /// Days of `Merged` time before `verify_advance` promotes an
+    /// episode to `StableNoRevert`. 30 by default — about a full
+    /// release cycle for most projects.
+    #[serde(default = "default_stable_threshold_days")]
+    pub stable_threshold_days: u32,
+    /// Default dollar cap for a single `tempera dream` invocation.
+    /// Overridable with `--max-usd`. Free phases ignore this.
+    #[serde(default = "default_dream_max_usd")]
+    pub default_max_usd: f32,
+}
+
+impl Default for DreamConfig {
+    fn default() -> Self {
+        Self {
+            stable_threshold_days: default_stable_threshold_days(),
+            default_max_usd: default_dream_max_usd(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +338,15 @@ fn default_min_falsifiability() -> f32 {
     0.7
 }
 
+fn default_stable_threshold_days() -> u32 {
+    30
+}
+
+fn default_dream_max_usd() -> f32 {
+    // v0.7.1 phases are free; this default exists for v0.7.2 onward.
+    0.50
+}
+
 fn default_consolidation_threshold() -> f32 {
     0.85
 }
@@ -335,6 +371,7 @@ impl Default for Config {
             retrieval: RetrievalConfig::default(),
             bellman: BellmanConfig::default(),
             storage: StorageConfig::default(),
+            dream: DreamConfig::default(),
         }
     }
 }
