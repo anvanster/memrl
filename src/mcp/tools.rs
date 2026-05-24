@@ -84,6 +84,27 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                     "session_id": {
                         "type": "string",
                         "description": "Link this episode to a session. Auto-detected if omitted: reuses session from recent same-project episodes (within 2 hours)."
+                    },
+                    "alternatives_considered": {
+                        "type": "array",
+                        "description": "Approaches you nearly took but ruled out, with the REASON each was rejected. The single highest-value field for future-you debugging — it stops the next session from re-exploring rejected paths. Populate when the capture's central claim is genuinely falsifiable (an actual BKM, not a logistics record).",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "approach": { "type": "string", "description": "The approach itself, in your own words" },
+                                "why_not": { "type": "string", "description": "WHY you rejected it. Without this the entry is useless." },
+                                "how_close": {
+                                    "type": "string",
+                                    "enum": ["near_miss", "plausible", "long_shot"],
+                                    "description": "near_miss = would have worked except one specific reason; plausible = correct, traded off against chosen approach; long_shot = dismissed briefly. Default plausible."
+                                },
+                                "would_revisit_if": {
+                                    "type": "string",
+                                    "description": "Optional trigger condition: 'revisit me if X changes'"
+                                }
+                            },
+                            "required": ["approach", "why_not"]
+                        }
                     }
                 },
                 "required": ["summary", "task_type", "outcome"]

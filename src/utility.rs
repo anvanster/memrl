@@ -715,8 +715,10 @@ mod tests {
     #[test]
     fn episode_can_propagate_blocks_no_claim_when_strict() {
         let ep = Episode::new("p".into(), "test".into());
-        let mut params = UtilityParams::default();
-        params.require_claim_for_propagation = true;
+        let params = UtilityParams {
+            require_claim_for_propagation: true,
+            ..UtilityParams::default()
+        };
         assert!(!episode_can_propagate(&ep, &params));
     }
 

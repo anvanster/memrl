@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 ///   v1 — initial stable shape from v0.4.0.
 ///   v2 — added `Outcome.verification` (v0.6.1).
 ///   v3 — added `Intent.claim` (falsifiability + category) (v0.6.2).
-pub const CURRENT_EPISODE_VERSION: u32 = 3;
+///   v4 — added `Episode.alternatives_considered` (v0.6.3).
+pub const CURRENT_EPISODE_VERSION: u32 = 4;
 
 fn default_schema_version() -> u32 {
     // Old episodes on disk pre-date the schema_version field. They are
@@ -45,6 +46,12 @@ pub struct Episode {
     /// Explicit links to related episodes
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_episodes: Vec<RelatedEpisode>,
+    /// Approaches considered but not taken, with the reason each was ruled
+    /// out. Added in episode schema v4 (v0.6.3). The road not taken is
+    /// often the single highest-value field for future-me debugging — it
+    /// stops the next session from re-exploring rejected paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives_considered: Vec<Alternative>,
 }
 
 impl Episode {
@@ -59,6 +66,7 @@ impl Episode {
             self = match self.schema_version {
                 1 => migrate_v1_to_v2(self)?,
                 2 => migrate_v2_to_v3(self)?,
+                3 => migrate_v3_to_v4(self)?,
                 v => bail!(
                     "no migration from episode schema v{v} to v{}",
                     CURRENT_EPISODE_VERSION
@@ -95,6 +103,15 @@ fn migrate_v1_to_v2(mut ep: Episode) -> Result<Episode> {
 /// fills it for new episodes. Migration is a version bump.
 fn migrate_v2_to_v3(mut ep: Episode) -> Result<Episode> {
     ep.schema_version = 3;
+    Ok(ep)
+}
+
+/// v3 → v4: added `Episode.alternatives_considered`. Field is `Vec<Alternative>`
+/// with serde default = empty. Old episodes simply have nothing recorded;
+/// new captures populate via the MCP `alternatives_considered` parameter
+/// when the agent has them to share.
+fn migrate_v3_to_v4(mut ep: Episode) -> Result<Episode> {
+    ep.schema_version = 4;
     Ok(ep)
 }
 
@@ -162,6 +179,52 @@ impl ClaimCategory {
 }
 
 impl std::fmt::Display for ClaimCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+/// An approach the author considered but did not take, with the reason it
+/// was ruled out. The most expensive thing a future session does is
+/// re-explore a rejected path; this field tells them not to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Alternative {
+    /// The approach itself, in the author's words.
+    pub approach: String,
+    /// Why this approach was rejected. The *reason* is what makes the
+    /// record useful — without it, future-me can't judge whether the
+    /// rejection still applies.
+    pub why_not: String,
+    /// Proximity to actually working. `NearMiss` is the most useful — it
+    /// signals "if this constraint shifts, revisit me first."
+    pub how_close: HowClose,
+    /// Trigger condition for revisiting. Optional; only sometimes known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub would_revisit_if: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HowClose {
+    /// Would have worked except for one specific reason.
+    NearMiss,
+    /// Plausibly correct, traded off against the chosen approach.
+    Plausible,
+    /// Considered briefly, dismissed.
+    LongShot,
+}
+
+impl HowClose {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NearMiss => "near_miss",
+            Self::Plausible => "plausible",
+            Self::LongShot => "long_shot",
+        }
+    }
+}
+
+impl std::fmt::Display for HowClose {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label())
     }
@@ -419,6 +482,7 @@ impl Episode {
             retrieval_history: vec![],
             session_id: None,
             related_episodes: vec![],
+            alternatives_considered: vec![],
         }
     }
 
@@ -494,6 +558,21 @@ impl Episode {
 
         md.push_str("## Tags\n\n");
         md.push_str(&format!("{}\n\n", self.intent.domain.join(", ")));
+
+        if !self.alternatives_considered.is_empty() {
+            md.push_str("## Alternatives Considered\n\n");
+            for alt in &self.alternatives_considered {
+                md.push_str(&format!(
+                    "- **[{}] {}** — {}",
+                    alt.how_close, alt.approach, alt.why_not
+                ));
+                if let Some(cond) = &alt.would_revisit_if {
+                    md.push_str(&format!(" *(revisit if: {})*", cond));
+                }
+                md.push('\n');
+            }
+            md.push('\n');
+        }
 
         if !self.related_episodes.is_empty() {
             md.push_str("## Related Episodes\n\n");
@@ -792,8 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v2_episode_advances_to_v3_keeping_verification() {
-        // An episode at v2 should reach v3 without losing the v2 field.
+    fn migrate_v2_episode_advances_to_current_keeping_verification() {
+        // An episode at v2 should reach CURRENT_EPISODE_VERSION without
+        // losing the v2 verification field.
         let mut ep = Episode::new("p".to_string(), "test".to_string());
         ep.schema_version = 2;
         ep.outcome.verification = VerificationState::Merged {
@@ -801,7 +881,7 @@ mod tests {
             at: Utc::now(),
         };
         let migrated = ep.migrate().unwrap();
-        assert_eq!(migrated.schema_version, 3);
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
         assert!(matches!(
             migrated.outcome.verification,
             VerificationState::Merged { .. }
@@ -838,6 +918,61 @@ mod tests {
             !json.contains("\"claim\""),
             "claim should be absent: {json}"
         );
+    }
+
+    #[test]
+    fn alternatives_default_empty_and_skip_when_empty() {
+        let ep = Episode::new("p".into(), "test".into());
+        assert!(ep.alternatives_considered.is_empty());
+        let json = serde_json::to_string(&ep).unwrap();
+        assert!(
+            !json.contains("alternatives_considered"),
+            "empty Vec should be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn alternative_serde_roundtrip() {
+        let mut ep = Episode::new("p".into(), "test".into());
+        ep.alternatives_considered.push(Alternative {
+            approach: "use Arc<Mutex<HashMap>>".to_string(),
+            why_not: "lock contention on hot path".to_string(),
+            how_close: HowClose::NearMiss,
+            would_revisit_if: Some("single-writer becomes the case".to_string()),
+        });
+        let json = serde_json::to_string(&ep).unwrap();
+        assert!(json.contains("\"how_close\":\"near_miss\""));
+        assert!(json.contains("\"alternatives_considered\""));
+        let parsed: Episode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.alternatives_considered.len(), 1);
+        let alt = &parsed.alternatives_considered[0];
+        assert_eq!(alt.how_close, HowClose::NearMiss);
+        assert_eq!(alt.would_revisit_if.as_deref(), Some("single-writer becomes the case"));
+    }
+
+    #[test]
+    fn how_close_serde_snake_case() {
+        for hc in &[HowClose::NearMiss, HowClose::Plausible, HowClose::LongShot] {
+            let json = serde_json::to_string(hc).unwrap();
+            let parsed: HowClose = serde_json::from_str(&json).unwrap();
+            assert_eq!(*hc, parsed);
+        }
+    }
+
+    #[test]
+    fn migrate_v3_episode_advances_to_v4_keeps_claim() {
+        let mut ep = Episode::new("p".into(), "test".into());
+        ep.schema_version = 3;
+        ep.intent.claim = Some(Claim {
+            falsifiability: 0.75,
+            category: ClaimCategory::Performance,
+        });
+        let migrated = ep.migrate().unwrap();
+        assert_eq!(migrated.schema_version, 4);
+        let claim = migrated.intent.claim.expect("claim retained");
+        assert!((claim.falsifiability - 0.75).abs() < 1e-6);
+        assert_eq!(claim.category, ClaimCategory::Performance);
+        assert!(migrated.alternatives_considered.is_empty());
     }
 
     #[test]

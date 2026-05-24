@@ -472,6 +472,23 @@ fn print_markdown_results(episodes: &[ScoredEpisode], query: &str) {
             }
         }
 
+        // v0.6.3: surface alternatives the author considered and ruled out.
+        // The road not taken is what future-me wastes time re-discovering.
+        if !ep.alternatives_considered.is_empty() {
+            println!("**Alternatives considered**:");
+            for alt in &ep.alternatives_considered {
+                let revisit = alt
+                    .would_revisit_if
+                    .as_deref()
+                    .map(|c| format!(" — revisit if: {}", c))
+                    .unwrap_or_default();
+                println!(
+                    "  - [{}] {} — {}{}",
+                    alt.how_close, alt.approach, alt.why_not, revisit
+                );
+            }
+        }
+
         println!();
     }
 

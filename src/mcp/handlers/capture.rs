@@ -65,6 +65,11 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         }
     }
 
+    // v0.6.3: parse alternatives_considered. The agent supplies these when
+    // the capture's claim is falsifiable enough to justify recording the
+    // road not taken.
+    let alternatives = parse_alternatives(args);
+
     let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
     let cfg = config::Config::load().unwrap_or_default();
 
@@ -78,6 +83,7 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         &tags,
         &files_modified,
         &errors,
+        &alternatives,
         cfg.storage.consolidation_threshold,
     )
     .await
@@ -93,6 +99,7 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     ep.intent.domain = tags;
     ep.intent.extracted_intent = summary.to_string();
     ep.context.errors_encountered = errors;
+    ep.alternatives_considered = alternatives;
     ep.timestamp_end = chrono::Utc::now();
 
     // Session chaining: use provided session_id or auto-detect from recent episodes
@@ -149,6 +156,7 @@ async fn try_consolidate(
     tags: &[String],
     files_modified: &[String],
     errors: &[episode::ErrorRecord],
+    alternatives: &[episode::Alternative],
     consolidation_threshold: f32,
 ) -> Option<String> {
     // Try vector search first
@@ -165,6 +173,7 @@ async fn try_consolidate(
             tags,
             files_modified,
             errors,
+            alternatives,
         );
     }
 
@@ -208,6 +217,18 @@ async fn try_consolidate(
         existing.context.errors_encountered.push(err.clone());
     }
 
+    // v0.6.3: union-merge alternatives by approach text. Same approach
+    // shouldn't get recorded twice; new approaches get appended.
+    for alt in alternatives {
+        if !existing
+            .alternatives_considered
+            .iter()
+            .any(|a| a.approach.eq_ignore_ascii_case(&alt.approach))
+        {
+            existing.alternatives_considered.push(alt.clone());
+        }
+    }
+
     // Update timestamp to mark when BKM was last refined
     existing.timestamp_end = chrono::Utc::now();
 
@@ -248,6 +269,7 @@ fn try_tag_consolidate(
     tags: &[String],
     files_modified: &[String],
     errors: &[episode::ErrorRecord],
+    alternatives: &[episode::Alternative],
 ) -> Option<String> {
     if tags.len() < 2 {
         return None; // Not enough tags to match on
@@ -292,6 +314,15 @@ fn try_tag_consolidate(
     }
     for err in errors {
         existing.context.errors_encountered.push(err.clone());
+    }
+    for alt in alternatives {
+        if !existing
+            .alternatives_considered
+            .iter()
+            .any(|a| a.approach.eq_ignore_ascii_case(&alt.approach))
+        {
+            existing.alternatives_considered.push(alt.clone());
+        }
     }
     existing.timestamp_end = chrono::Utc::now();
 
@@ -346,5 +377,104 @@ fn resolve_session_id(
         updated.session_id = Some(new_session.clone());
         let _ = store.update(&updated);
         Some(new_session)
+    }
+}
+
+/// Parse the optional `alternatives_considered` array from MCP arguments.
+/// Each entry must include `approach` and `why_not`. `how_close` defaults
+/// to `Plausible` when omitted (the safe middle case). Malformed entries
+/// are skipped rather than failing the whole capture.
+pub(crate) fn parse_alternatives(args: &Value) -> Vec<episode::Alternative> {
+    let Some(arr) = args
+        .get("alternatives_considered")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| {
+            let approach = v.get("approach").and_then(|x| x.as_str())?;
+            let why_not = v.get("why_not").and_then(|x| x.as_str())?;
+            let how_close = v
+                .get("how_close")
+                .and_then(|x| x.as_str())
+                .map(parse_how_close)
+                .unwrap_or(episode::HowClose::Plausible);
+            let would_revisit_if = v
+                .get("would_revisit_if")
+                .and_then(|x| x.as_str())
+                .map(String::from);
+            Some(episode::Alternative {
+                approach: approach.to_string(),
+                why_not: why_not.to_string(),
+                how_close,
+                would_revisit_if,
+            })
+        })
+        .collect()
+}
+
+fn parse_how_close(s: &str) -> episode::HowClose {
+    match s.to_lowercase().replace('-', "_").as_str() {
+        "near_miss" | "nearmiss" | "near" => episode::HowClose::NearMiss,
+        "long_shot" | "longshot" | "long" => episode::HowClose::LongShot,
+        _ => episode::HowClose::Plausible,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_alternatives_empty_when_absent() {
+        let args = json!({"summary": "x"});
+        assert!(parse_alternatives(&args).is_empty());
+    }
+
+    #[test]
+    fn parse_alternatives_skips_malformed_entries() {
+        let args = json!({
+            "alternatives_considered": [
+                {"approach": "use Mutex", "why_not": "lock contention"},
+                {"approach": "skip why_not"},
+                {"why_not": "skip approach"},
+                {"approach": "use Arc<RwLock>", "why_not": "writes are too frequent", "how_close": "near_miss"}
+            ]
+        });
+        let alts = parse_alternatives(&args);
+        assert_eq!(alts.len(), 2, "malformed entries should be skipped");
+        assert_eq!(alts[0].approach, "use Mutex");
+        assert_eq!(alts[0].how_close, episode::HowClose::Plausible); // default
+        assert_eq!(alts[1].how_close, episode::HowClose::NearMiss);
+    }
+
+    #[test]
+    fn parse_how_close_aliases() {
+        assert_eq!(parse_how_close("near_miss"), episode::HowClose::NearMiss);
+        assert_eq!(parse_how_close("near-miss"), episode::HowClose::NearMiss);
+        assert_eq!(parse_how_close("nearmiss"), episode::HowClose::NearMiss);
+        assert_eq!(parse_how_close("long_shot"), episode::HowClose::LongShot);
+        assert_eq!(parse_how_close("plausible"), episode::HowClose::Plausible);
+        assert_eq!(parse_how_close("garbage"), episode::HowClose::Plausible);
+    }
+
+    #[test]
+    fn parse_alternatives_preserves_revisit_if() {
+        let args = json!({
+            "alternatives_considered": [{
+                "approach": "use channels",
+                "why_not": "too much serialization overhead",
+                "how_close": "plausible",
+                "would_revisit_if": "messages become large objects"
+            }]
+        });
+        let alts = parse_alternatives(&args);
+        assert_eq!(alts.len(), 1);
+        assert_eq!(
+            alts[0].would_revisit_if.as_deref(),
+            Some("messages become large objects")
+        );
     }
 }
