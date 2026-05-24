@@ -156,6 +156,19 @@ impl ReflectionStore {
         Ok(())
     }
 
+    /// All reflections with `date >= since`, ordered oldest → newest.
+    /// Used by the patterns phase to cluster a rolling window.
+    pub async fn list_since(&self, since: &NaiveDate) -> Result<Vec<Reflection>> {
+        let rows = sqlx::query(
+            "SELECT id, date, project, body, citations, signals, triage_score, model, created_at
+             FROM reflections WHERE date >= ?1 ORDER BY date ASC",
+        )
+        .bind(since.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::row_to_reflection).collect()
+    }
+
     pub async fn list_by_date(&self, date: &NaiveDate) -> Result<Vec<Reflection>> {
         let rows = sqlx::query(
             "SELECT id, date, project, body, citations, signals, triage_score, model, created_at

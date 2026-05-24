@@ -27,6 +27,7 @@ mod indexer;
 mod jobs;
 mod keyword;
 mod llm;
+mod patterns;
 mod reflect;
 mod retrieve;
 mod stats;
@@ -209,6 +210,25 @@ enum Commands {
         dry_run: bool,
 
         /// Emit the reflection record as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Cluster recent reflections and surface cross-day patterns. Reads
+    /// the last N days of reflections (config.dream.patterns_lookback_days,
+    /// default 30), embeds each, agglomerative-clusters at the configured
+    /// cosine threshold, and asks Sonnet to name the shared theme for any
+    /// cluster with `>= patterns_min_evidence` members.
+    Patterns {
+        /// Override patterns_lookback_days for this run.
+        #[arg(long)]
+        since_days: Option<u32>,
+
+        /// Show what would run + planned clusters; no LLM call.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -462,6 +482,54 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Patterns {
+            since_days,
+            dry_run,
+            json,
+        } => {
+            let mut cfg = config.clone();
+            if let Some(d) = since_days {
+                cfg.dream.patterns_lookback_days = d;
+            }
+            if dry_run {
+                let cutoff = chrono::Utc::now()
+                    - chrono::Duration::days(cfg.dream.patterns_lookback_days as i64);
+                let reflect_store = reflect::ReflectionStore::open_default().await?;
+                let reflections = reflect_store.list_since(&cutoff.date_naive()).await?;
+                let plan = serde_json::json!({
+                    "lookback_days": cfg.dream.patterns_lookback_days,
+                    "min_evidence": cfg.dream.patterns_min_evidence,
+                    "cluster_threshold": cfg.dream.patterns_cluster_threshold,
+                    "reflections_in_window": reflections.len(),
+                    "would_cluster": reflections.len() >= cfg.dream.patterns_min_evidence,
+                    "estimated_cost_usd_worst_case": patterns::PATTERN_ESTIMATED_COST_USD * 3.0,
+                });
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(());
+            }
+            let budget = dream::CostBudget::new(cfg.dream.default_max_usd);
+            let report = patterns::run_patterns(&cfg, Some(&budget)).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!();
+                println!("Patterns phase");
+                println!("  reflections examined:  {}", report.reflections_examined);
+                println!("  clusters found:        {}", report.clusters_found);
+                println!(
+                    "  clusters above min:    {} (min_evidence={})",
+                    report.clusters_above_min, cfg.dream.patterns_min_evidence
+                );
+                println!("  patterns written:      {}", report.patterns_written);
+                println!(
+                    "  patterns already exist: {}",
+                    report.patterns_skipped_existing
+                );
+                println!("  clusters w/o theme:    {}", report.clusters_with_no_theme);
+                println!();
+            }
         }
 
         Commands::Reflect {

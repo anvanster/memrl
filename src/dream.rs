@@ -29,6 +29,7 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::episode::VerificationState;
+use crate::patterns;
 use crate::reflect;
 use crate::store::EpisodeStore;
 use crate::triage;
@@ -45,6 +46,9 @@ pub enum PhaseName {
     /// Author a daily reflection page when triage approves (v0.7.3+).
     /// Runs Haiku triage internally; skips below-threshold days.
     Reflect,
+    /// Cluster recent reflections and author pattern pages for clusters
+    /// with `>= patterns_min_evidence` members (v0.7.4+).
+    Patterns,
 }
 
 impl PhaseName {
@@ -53,6 +57,7 @@ impl PhaseName {
             Self::VerifyAdvance => "verify_advance",
             Self::Decay => "decay",
             Self::Reflect => "reflect",
+            Self::Patterns => "patterns",
         }
     }
 }
@@ -64,8 +69,9 @@ impl FromStr for PhaseName {
             "verify_advance" => Self::VerifyAdvance,
             "decay" => Self::Decay,
             "reflect" => Self::Reflect,
+            "patterns" => Self::Patterns,
             other => anyhow::bail!(
-                "unknown phase '{other}' (expected: verify_advance | decay | reflect)"
+                "unknown phase '{other}' (expected: verify_advance | decay | reflect | patterns)"
             ),
         })
     }
@@ -84,6 +90,7 @@ const FULL_CYCLE_ORDER: &[PhaseName] = &[
     PhaseName::VerifyAdvance,
     PhaseName::Decay,
     PhaseName::Reflect,
+    PhaseName::Patterns,
 ];
 
 pub fn all_phases() -> &'static [PhaseName] {
@@ -205,6 +212,12 @@ fn estimate(phase: PhaseName) -> CostEstimate {
             usd: reflect::REFLECT_ESTIMATED_COST_USD + triage::TRIAGE_ESTIMATED_COST_USD,
             estimated_seconds: 20,
         },
+        // Patterns: assume up to 3 clusters to author per run. Many days
+        // will produce 0–1; this is a worst-case budget guard.
+        PhaseName::Patterns => CostEstimate {
+            usd: patterns::PATTERN_ESTIMATED_COST_USD * 3.0,
+            estimated_seconds: 30,
+        },
     }
 }
 
@@ -220,6 +233,7 @@ async fn dispatch(phase: PhaseName, ctx: &PhaseContext<'_>) -> Result<PhaseRepor
             (s, m, 0.0)
         }
         PhaseName::Reflect => run_reflect(ctx).await?,
+        PhaseName::Patterns => run_patterns(ctx).await?,
     };
     Ok(PhaseReport {
         name: phase,
@@ -471,6 +485,32 @@ async fn run_reflect(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f32
     ))
 }
 
+/// v0.7.4: cluster reflections from the last N days and author pattern
+/// pages for clusters with shared themes.
+async fn run_patterns(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f32)> {
+    let report = patterns::run_patterns(ctx.config, Some(ctx.budget))
+        .await
+        .context("patterns phase failed")?;
+    let cost_usd = report.patterns_written as f32 * patterns::PATTERN_ESTIMATED_COST_USD;
+    let summary = if report.reflections_examined < ctx.config.dream.patterns_min_evidence {
+        format!(
+            "{} reflection(s) — below min_evidence {} (no clustering)",
+            report.reflections_examined, ctx.config.dream.patterns_min_evidence
+        )
+    } else {
+        format!(
+            "examined {} reflections, {} clusters ({} above min), {} pattern(s) written, {} existing, {} themeless",
+            report.reflections_examined,
+            report.clusters_found,
+            report.clusters_above_min,
+            report.patterns_written,
+            report.patterns_skipped_existing,
+            report.clusters_with_no_theme,
+        )
+    };
+    Ok((PhaseStatus::Ok, summary, cost_usd))
+}
+
 // ===== Output =====
 
 pub fn print_cycle(report: &CycleReport, dry: bool) {
@@ -582,9 +622,9 @@ mod tests {
 
     #[test]
     fn estimate_paid_phases_have_positive_cost() {
-        // Reflect (v0.7.3+) is the first paid phase. Catches regressions
-        // if someone accidentally zeroes its estimate.
-        for p in &[PhaseName::Reflect] {
+        // Catches regressions if someone accidentally zeroes a paid
+        // phase's estimate.
+        for p in &[PhaseName::Reflect, PhaseName::Patterns] {
             let e = estimate(*p);
             assert!(e.usd > 0.0, "paid phase {p:?} has zero estimate");
         }

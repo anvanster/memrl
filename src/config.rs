@@ -45,6 +45,16 @@ pub struct DreamConfig {
     /// Max output tokens for a reflection body. 1500 ≈ ~1000 words.
     #[serde(default = "default_reflect_max_tokens")]
     pub reflect_max_tokens: u32,
+    /// Days of recent reflections fed into the patterns phase (v0.7.4).
+    #[serde(default = "default_patterns_lookback_days")]
+    pub patterns_lookback_days: u32,
+    /// Minimum cluster size before a pattern page gets authored.
+    #[serde(default = "default_patterns_min_evidence")]
+    pub patterns_min_evidence: usize,
+    /// Cosine-similarity threshold for single-linkage clustering.
+    /// 0.75 ≈ "clearly related theme"; lower = more permissive.
+    #[serde(default = "default_patterns_cluster_threshold")]
+    pub patterns_cluster_threshold: f32,
 }
 
 impl Default for DreamConfig {
@@ -55,6 +65,9 @@ impl Default for DreamConfig {
             triage_model: default_triage_model(),
             reflect_model: default_reflect_model(),
             reflect_max_tokens: default_reflect_max_tokens(),
+            patterns_lookback_days: default_patterns_lookback_days(),
+            patterns_min_evidence: default_patterns_min_evidence(),
+            patterns_cluster_threshold: default_patterns_cluster_threshold(),
         }
     }
 }
@@ -370,6 +383,18 @@ fn default_reflect_model() -> String {
 
 fn default_reflect_max_tokens() -> u32 {
     1500
+}
+
+fn default_patterns_lookback_days() -> u32 {
+    30
+}
+
+fn default_patterns_min_evidence() -> usize {
+    3
+}
+
+fn default_patterns_cluster_threshold() -> f32 {
+    0.75
 }
 
 fn default_consolidation_threshold() -> f32 {
