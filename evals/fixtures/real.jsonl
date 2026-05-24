@@ -1,0 +1,47 @@
+# Tempera labeled fixture — real episode IDs from local brain (121 episodes).
+#
+# Hand-labeled by Andrey Vasilevsky + Claude in 2026-05.
+#
+# Query mix:
+#   - literal-token queries (favor BM25)     : q01-q10
+#   - conceptual / paraphrastic (favor vector): q11-q18
+#   - mixed-shape (RRF should outperform either) : q19-q25
+#
+# Grades: 3 = highly relevant, 2 = relevant, 1 = partial / related.
+#
+# This file is committed to the repo because the episode UUIDs themselves
+# don't leak content. The episode bodies are private and stay in ~/.tempera/.
+#
+# ---------------- LITERAL-TOKEN QUERIES ----------------
+
+{"id": "q01", "query": "FASTEMBED_CACHE_DIR env var fastembed cache directory", "relevant": [{"id": "f9ebf7c1-436e-49bb-a0c2-7bdeb87288d5", "grade": 3}, {"id": "b894c53e-4d3f-4178-9309-97277546dfc7", "grade": 1}], "tags": ["literal-token", "rust", "fastembed"], "notes": "exact env var name; vector may drift to generic 'caching' content"}
+{"id": "q02", "query": "BLAKE3 32 byte hash content addressed cache key", "relevant": [{"id": "b3d0ded9-729e-42cb-80d1-8db6b3efd80d", "grade": 3}, {"id": "095466b6-d2dd-46f9-adf7-6954f7489317", "grade": 2}], "tags": ["literal-token", "hashing"], "notes": "BLAKE3 is a distinctive token"}
+{"id": "q03", "query": "tree-sitter has_error check tolerant parsing PHP TCL", "relevant": [{"id": "7075ddb8-5058-47e2-bdb7-4b13f8092c17", "grade": 3}], "tags": ["literal-token", "tree-sitter"], "notes": "has_error is a literal method name"}
+{"id": "q04", "query": "pgvector cosine float4 float8 sqlx type mismatch", "relevant": [{"id": "8cbd7a43-8cfc-42da-b1fc-610ea61a93a0", "grade": 3}], "tags": ["literal-token", "pgvector", "sqlx"], "notes": "very specific types; BM25 should dominate"}
+{"id": "q05", "query": "cargo-zigbuild glibc version target Linux cross-platform", "relevant": [{"id": "3956e9f2-b9cf-4dea-b8a3-9518bce71f31", "grade": 3}, {"id": "f38ed638-6a1c-4619-b2a0-409661e83a58", "grade": 3}], "tags": ["literal-token", "cross-platform"], "notes": "two related cross-build episodes"}
+{"id": "q06", "query": "POCMA propagate_on_container_move_assignment allocator", "relevant": [{"id": "28bb2bce-2630-4bf4-8d7d-0a45f47f28b9", "grade": 3}], "tags": ["literal-token", "c++"], "notes": "POCMA is a textbook acronym; vector unlikely to recognize"}
+{"id": "q07", "query": "ix:hidden iXBRL SEC EDGAR 8-K HTML extraction", "relevant": [{"id": "85abeb46-a7d5-48e0-a7a0-4e9c150dcd93", "grade": 3}], "tags": ["literal-token", "xbrl", "sec"], "notes": "ix:hidden is a specific XML tag"}
+{"id": "q08", "query": "find_by_signature glob-to-regex param counting return type", "relevant": [{"id": "32b8b94f-950c-4211-a147-f1af966970e8", "grade": 3}], "tags": ["literal-token", "codegraph"], "notes": "function name + transformation"}
+{"id": "q09", "query": "macro_rules! token_tree tokio::select! Self::handle_event opaque", "relevant": [{"id": "aed9ffaa-d0fe-46c7-b925-9ed8f331028a", "grade": 3}], "tags": ["literal-token", "tree-sitter", "rust"], "notes": "very Rust-specific identifiers"}
+{"id": "q10", "query": "type_annotation child_by_field_name TypeScript tree-sitter", "relevant": [{"id": "c0b0fc77-3c1f-4ae9-a042-d3d4e691bcb7", "grade": 3}], "tags": ["literal-token", "tree-sitter", "typescript"], "notes": "exact tree-sitter API"}
+
+# ---------------- CONCEPTUAL / PARAPHRASTIC QUERIES ----------------
+
+{"id": "q11", "query": "how to design MCP tool descriptions so agents actually use them well", "relevant": [{"id": "3cb134b1-2bc4-4305-aad7-408a4582b764", "grade": 3}, {"id": "9a6d6379-c298-4f89-adce-bb5d43cc5f28", "grade": 3}, {"id": "7be6325c-ce64-4f96-ad32-5a3251f01c40", "grade": 2}], "tags": ["conceptual", "mcp", "prompt-engineering"], "notes": "no literal overlap; vector should excel"}
+{"id": "q12", "query": "strategy for debugging unfamiliar tree-sitter grammars", "relevant": [{"id": "09554e38-d0a8-4c20-b45b-188b8fdfe5d1", "grade": 3}, {"id": "9ff6e92d-5767-4881-9a6d-f708426ef6b5", "grade": 3}], "tags": ["conceptual", "tree-sitter"], "notes": "general strategy not a specific API"}
+{"id": "q13", "query": "test isolation when system under test has shared persistent state", "relevant": [{"id": "e5716afd-e00b-460e-a1af-0c5d66dc55bd", "grade": 3}], "tags": ["conceptual", "testing"], "notes": "paraphrastic — the episode says 'tempdir-based workspaces' not 'isolation'"}
+{"id": "q14", "query": "reducing false positives in dead code analysis", "relevant": [{"id": "93a0fe96-eac8-4632-87eb-3a69eb8b007c", "grade": 3}, {"id": "a3389055-5b4c-439d-b305-263dc5ab72c6", "grade": 2}], "tags": ["conceptual", "static-analysis"], "notes": "concept-level query"}
+{"id": "q15", "query": "improving result diversity in semantic search", "relevant": [{"id": "1bc8d435-5a25-4b76-a5a9-50dff6a67762", "grade": 3}, {"id": "15f7ce56-a46f-460a-9cb1-0854ac61601f", "grade": 1}], "tags": ["conceptual", "search", "reranker"], "notes": "concept of diversity penalty"}
+{"id": "q16", "query": "running parallel async work over shared state without ownership transfer", "relevant": [{"id": "660ef4ec-f9a3-496b-a5e2-1d5e8dfd3d19", "grade": 3}], "tags": ["conceptual", "async-rust"], "notes": "asks the problem, not the solution name"}
+{"id": "q17", "query": "preventing one heavy producer from starving others in a queue", "relevant": [{"id": "0d7345b0-9c2b-4b7c-8f50-39c43f5bc953", "grade": 3}, {"id": "a56b6c57-5c29-4d0d-928b-d68f1b1770de", "grade": 1}], "tags": ["conceptual", "rate-limiting"], "notes": "fairness concept, no literal SEC EDGAR token"}
+{"id": "q18", "query": "what is the right approach to consolidate similar past episodes in tempera", "relevant": [{"id": "fe7a6d42-8c46-4d9b-bcbd-696971c60f72", "grade": 3}], "tags": ["conceptual", "tempera"], "notes": "tempera self-referential"}
+
+# ---------------- MIXED-SHAPE QUERIES (hybrid should beat either alone) ----------------
+
+{"id": "q19", "query": "Anthropic Haiku 4.5 prompt cache minimum token threshold not engaging", "relevant": [{"id": "edbcdc6c-669e-4f1f-b6d0-182ae698d2bc", "grade": 3}], "tags": ["mixed", "anthropic", "caching"], "notes": "literal model name + conceptual problem"}
+{"id": "q20", "query": "cyclomatic complexity tree-sitter visitor across language parsers", "relevant": [{"id": "b3bf86fd-36c5-4d32-853d-aa2fed6a781d", "grade": 3}, {"id": "b5f878c7-d3c9-42e9-a6e5-6e9326cf03e8", "grade": 3}, {"id": "c00af019-f9f4-4711-b94b-e1cf19150b1a", "grade": 3}], "tags": ["mixed", "tree-sitter"], "notes": "three relevant episodes, one per language"}
+{"id": "q21", "query": "extracting function calls in tree-sitter visitor with current function context", "relevant": [{"id": "9d651d5e-3c3a-4586-9e9f-56062e9ec05d", "grade": 3}], "tags": ["mixed", "tree-sitter"], "notes": "API names + technique"}
+{"id": "q22", "query": "embedding model migration from model2vec to fastembed BGE", "relevant": [{"id": "b894c53e-4d3f-4178-9309-97277546dfc7", "grade": 3}, {"id": "3989416a-6986-4170-bfea-f34792365f02", "grade": 2}], "tags": ["mixed", "embeddings"], "notes": "model names + migration concept"}
+{"id": "q23", "query": "BFS graph traversal that filters node types without losing reachability", "relevant": [{"id": "63d167a2-202f-457e-a59b-8680d9d2de84", "grade": 3}, {"id": "a9ab5584-ced9-4ce4-92de-8fe83a7b9e32", "grade": 1}], "tags": ["mixed", "graph"], "notes": "BFS is literal, rest is conceptual"}
+{"id": "q24", "query": "git mining commit classification with keyword fallback when conventional prefix missing", "relevant": [{"id": "4aec50d9-623f-44d7-8787-91064e8b3613", "grade": 3}], "tags": ["mixed", "git"], "notes": "mix of literal (conventional commit) and shape"}
+{"id": "q25", "query": "HNSW per-class index for filtered approximate nearest neighbor", "relevant": [{"id": "c1f7ee96-7c15-4795-bf3a-aa806d4cecda", "grade": 3}, {"id": "8b0d6207-ec4e-479c-8f0d-c9a357eec699", "grade": 1}], "tags": ["mixed", "hnsw"], "notes": "HNSW literal + filtered ANN concept"}

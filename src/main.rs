@@ -185,6 +185,11 @@ enum EvalCommand {
         /// Top-K cutoff for metrics
         #[arg(long, default_value_t = eval::DEFAULT_K)]
         k: usize,
+
+        /// Override retrieval mode for this run (vector|keyword|hybrid).
+        /// If omitted, uses config.retrieval.mode.
+        #[arg(long)]
+        mode: Option<String>,
     },
 
     /// Run the fixture and diff against the most recent baseline.
@@ -200,6 +205,11 @@ enum EvalCommand {
         /// Also persist this run as a baseline alongside the diff
         #[arg(long)]
         save: bool,
+
+        /// Override retrieval mode for this run (vector|keyword|hybrid).
+        /// If omitted, uses config.retrieval.mode.
+        #[arg(long)]
+        mode: Option<String>,
     },
 }
 
@@ -276,11 +286,18 @@ async fn main() -> Result<()> {
         }
 
         Commands::Eval(args) => match args.command {
-            EvalCommand::Baseline { fixture, k } => {
-                eval::run_baseline(&fixture, k, &config).await?;
+            EvalCommand::Baseline { fixture, k, mode } => {
+                let cfg = override_mode(&config, mode.as_deref())?;
+                eval::run_baseline(&fixture, k, &cfg).await?;
             }
-            EvalCommand::Run { fixture, k, save } => {
-                eval::run_against_baseline(&fixture, k, save, &config).await?;
+            EvalCommand::Run {
+                fixture,
+                k,
+                save,
+                mode,
+            } => {
+                let cfg = override_mode(&config, mode.as_deref())?;
+                eval::run_against_baseline(&fixture, k, save, &cfg).await?;
             }
         },
     }
@@ -388,6 +405,22 @@ fn run_prune(
 
     println!("\n✅ Prune complete!");
     Ok(())
+}
+
+/// Clone `config` with `retrieval.mode` replaced if `mode_str` is set.
+fn override_mode(config: &config::Config, mode_str: Option<&str>) -> Result<config::Config> {
+    let Some(s) = mode_str else {
+        return Ok(config.clone());
+    };
+    let mode = match s.to_lowercase().as_str() {
+        "vector" => config::RetrievalMode::Vector,
+        "keyword" => config::RetrievalMode::Keyword,
+        "hybrid" => config::RetrievalMode::Hybrid,
+        other => anyhow::bail!("invalid --mode '{other}': expected vector | keyword | hybrid"),
+    };
+    let mut cfg = config.clone();
+    cfg.retrieval.mode = mode;
+    Ok(cfg)
 }
 
 fn init_project() -> Result<()> {

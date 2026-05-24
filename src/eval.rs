@@ -85,8 +85,16 @@ pub struct EvalRun {
     pub git_commit: Option<String>,
     pub fixture_path: String,
     pub k: usize,
+    /// Retrieval mode used for this run. Defaults to "hybrid" on older
+    /// baselines that didn't record it.
+    #[serde(default = "default_mode_label")]
+    pub mode: String,
     pub aggregate: AggregateMetrics,
     pub per_query: Vec<QueryResult>,
+}
+
+fn default_mode_label() -> String {
+    "hybrid".to_string()
 }
 
 // ===== Fixture loading =====
@@ -244,6 +252,7 @@ pub async fn run_eval(fixture_path: &Path, k: usize, config: &Config) -> Result<
         git_commit: try_git_commit(),
         fixture_path: fixture_path.display().to_string(),
         k,
+        mode: format!("{:?}", config.retrieval.mode).to_lowercase(),
         aggregate: agg,
         per_query,
     })
@@ -352,13 +361,15 @@ pub fn print_run(run: &EvalRun, baseline: Option<&EvalRun>) {
         "  commit:  {}",
         run.git_commit.as_deref().unwrap_or("(none)")
     );
+    println!("  mode:    {}", run.mode);
     println!("  queries: {}", a.queries_evaluated);
     if let Some(b) = baseline {
         let bts = b.timestamp.format("%Y-%m-%d %H:%M UTC");
         let bcommit = b.git_commit.as_deref().unwrap_or("(none)");
         println!(
-            "  vs baseline: {} (commit {})",
+            "  vs baseline: {} ({}, commit {})",
             bts.to_string().dimmed(),
+            b.mode.dimmed(),
             bcommit.dimmed()
         );
     }
@@ -566,6 +577,7 @@ mod tests {
             git_commit: Some("abc1234".to_string()),
             fixture_path: "evals/fixtures/test.jsonl".to_string(),
             k: 5,
+            mode: "hybrid".to_string(),
             aggregate: AggregateMetrics {
                 mean_p_at_k: 0.42,
                 mean_r_at_k: 0.61,
