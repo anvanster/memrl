@@ -20,6 +20,7 @@ mod episode;
 mod eval;
 mod feedback;
 mod indexer;
+mod jobs;
 mod keyword;
 mod llm;
 mod retrieve;
@@ -166,6 +167,42 @@ enum Commands {
 
     /// Retrieval evaluation harness (P@K, R@K, MRR, nDCG@K)
     Eval(EvalArgs),
+
+    /// Run the background job daemon (foreground, Ctrl+C to stop)
+    Daemon,
+
+    /// Manage background jobs (submit, list)
+    Job(JobArgs),
+}
+
+#[derive(Args)]
+struct JobArgs {
+    #[command(subcommand)]
+    command: JobCommand,
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Submit a new job to the queue
+    Submit {
+        /// Job kind (currently: index | propagate)
+        kind: String,
+
+        /// JSON payload for the handler (default: {})
+        #[arg(long, default_value = "{}")]
+        payload: String,
+    },
+
+    /// List jobs in the queue
+    List {
+        /// Filter by status: pending | running | completed | dead
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum rows to show
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
 }
 
 #[derive(Args)]
@@ -298,6 +335,36 @@ async fn main() -> Result<()> {
             } => {
                 let cfg = override_mode(&config, mode.as_deref())?;
                 eval::run_against_baseline(&fixture, k, save, &cfg).await?;
+            }
+        },
+
+        Commands::Daemon => {
+            let queue = jobs::JobQueue::open_default().await?;
+            jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Job(args) => match args.command {
+            JobCommand::Submit { kind, payload } => {
+                let queue = jobs::JobQueue::open_default().await?;
+                let parsed: serde_json::Value = serde_json::from_str(&payload)
+                    .map_err(|e| anyhow::anyhow!("--payload is not valid JSON: {e}"))?;
+                let id = queue.submit(&kind, parsed).await?;
+                println!("submitted job {id} ({kind})");
+            }
+            JobCommand::List { status, limit } => {
+                let queue = jobs::JobQueue::open_default().await?;
+                let status = match status.as_deref() {
+                    Some(s) => Some(s.parse::<jobs::JobStatus>()?),
+                    None => None,
+                };
+                let rows = queue.list(status, limit).await?;
+                if rows.is_empty() {
+                    println!("(no jobs)");
+                } else {
+                    for job in &rows {
+                        println!("{}", jobs::format_job_summary(job));
+                    }
+                }
             }
         },
     }

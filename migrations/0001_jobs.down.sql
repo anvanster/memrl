@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS jobs_by_kind;
+DROP INDEX IF EXISTS jobs_pending;
+DROP TABLE IF EXISTS jobs;
