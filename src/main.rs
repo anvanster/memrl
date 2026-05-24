@@ -14,6 +14,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+mod backup;
 mod capture;
 mod config;
 mod episode;
@@ -173,6 +174,24 @@ enum Commands {
 
     /// Manage background jobs (submit, list)
     Job(JobArgs),
+
+    /// Snapshot or restore the tempera data directory
+    Backup(BackupArgs),
+}
+
+#[derive(Args)]
+struct BackupArgs {
+    /// Restore a previous snapshot by timestamp (e.g. 20260524T123456Z)
+    #[arg(long)]
+    restore: Option<String>,
+
+    /// List available snapshots
+    #[arg(long)]
+    list: bool,
+
+    /// With --restore: skip safety checks (empty snapshot, etc.)
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Args)]
@@ -341,6 +360,25 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Backup(args) => {
+            if args.list {
+                let snapshots = backup::list_snapshots()?;
+                if snapshots.is_empty() {
+                    println!("(no snapshots)");
+                } else {
+                    for ts in &snapshots {
+                        println!("{ts}");
+                    }
+                }
+            } else if let Some(ts) = args.restore {
+                backup::restore(&ts, args.force)?;
+                println!("restored snapshot {ts}");
+            } else {
+                let path = backup::snapshot()?;
+                println!("snapshot saved: {}", path.display());
+            }
         }
 
         Commands::Job(args) => match args.command {
