@@ -100,9 +100,13 @@ pub async fn try_vector_search(
     for result in search_results {
         if let Ok(episode) = store.load(&result.id) {
             let utility = episode.utility.calculate_score();
-            let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
-            let verif = episode.outcome.verification.weight();
-            let combined = combined_score(result.similarity_score, utility, recency, verif, config);
+            let salience = salience_score(&episode, config);
+            let combined = combined_score(
+                result.similarity_score,
+                salience,
+                config.retrieval.similarity_weight,
+                config.retrieval.salience_weight,
+            );
 
             episodes.push(ScoredEpisode {
                 episode,
@@ -160,9 +164,13 @@ pub async fn try_keyword_search(
             let episode = store.load(&hit.id).ok()?;
             let sim = hit.score / max_score;
             let utility = episode.utility.calculate_score();
-            let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
-            let verif = episode.outcome.verification.weight();
-            let combined = combined_score(sim, utility, recency, verif, config);
+            let salience = salience_score(&episode, config);
+            let combined = combined_score(
+                sim,
+                salience,
+                config.retrieval.similarity_weight,
+                config.retrieval.salience_weight,
+            );
             Some(ScoredEpisode {
                 episode,
                 similarity_score: sim,
@@ -229,9 +237,12 @@ pub async fn try_hybrid_search(
 
     let max_rrf = fused.first().map(|(_, s)| *s).unwrap_or(1e-6).max(1e-6);
 
+    // Hybrid uses its own more-similarity-biased weights — RRF-normalized
+    // scores have a compressed distribution that needs different
+    // calibration than raw cosine. The "utility" weight name is kept for
+    // config-compat; semantically it now weights the v0.7.7 salience term.
     let sim_w = config.retrieval.hybrid_similarity_weight;
-    let util_w = config.retrieval.hybrid_utility_weight;
-    let total_w = (sim_w + util_w).max(f32::EPSILON);
+    let sal_w = config.retrieval.hybrid_utility_weight;
 
     let mut episodes: Vec<ScoredEpisode> = fused
         .into_iter()
@@ -241,13 +252,8 @@ pub async fn try_hybrid_search(
             // Normalize RRF to [0, 1] within this result set.
             let sim_normalized = rrf_score / max_rrf;
             let utility = episode.utility.calculate_score();
-            let verif = episode.outcome.verification.weight();
-            // Hybrid-specific blend: RRF dominates (its rank carries both
-            // lexical and semantic signal), utility is a smaller reweight,
-            // damped by verification (Untested→0.30, ValidatedCrossProject→1.0).
-            // Recency is intentionally omitted here — opt in via config if
-            // you want it back in hybrid ranking.
-            let combined = (sim_w * sim_normalized + util_w * utility * verif) / total_w;
+            let salience = salience_score(&episode, config);
+            let combined = combined_score(sim_normalized, salience, sim_w, sal_w);
             // Surface true cosine sim when this doc came through the vector
             // path; fall back to RRF-normalized score otherwise.
             let surface_sim = vector_sim.get(&id).copied().unwrap_or(sim_normalized);
@@ -310,9 +316,13 @@ pub fn retrieve_episodes_text(
         .map(|ep| {
             let similarity = calculate_text_similarity(query, &ep);
             let utility = ep.utility.calculate_score();
-            let recency = calculate_recency_score(&ep, config.retrieval.recency_halflife_days);
-            let verif = ep.outcome.verification.weight();
-            let combined = combined_score(similarity, utility, recency, verif, config);
+            let salience = salience_score(&ep, config);
+            let combined = combined_score(
+                similarity,
+                salience,
+                config.retrieval.similarity_weight,
+                config.retrieval.salience_weight,
+            );
 
             ScoredEpisode {
                 episode: ep,
@@ -347,26 +357,36 @@ fn calculate_recency_score(episode: &Episode, halflife_days: f32) -> f32 {
     (-age_days * 2.0_f32.ln() / halflife_days).exp()
 }
 
-/// Combine similarity, utility, and recency scores with weight normalization.
+/// v0.7.7: unified salience signal.
 ///
-/// `verification_weight` multiplies the utility contribution — captures with
-/// no external verification (Untested = 0.30) get their utility damped
-/// relative to merged-and-stable ones (1.0). See `VerificationState::weight`.
-fn combined_score(
-    similarity: f32,
-    utility: f32,
-    recency: f32,
-    verification_weight: f32,
-    config: &Config,
-) -> f32 {
-    let sim_w = config.retrieval.similarity_weight;
-    let util_w = config.retrieval.utility_weight;
-    let rec_w = config.retrieval.recency_weight;
-    let total = sim_w + util_w + rec_w;
+/// `salience = utility × verification_weight × recency × inv_freq`
+///
+/// - `utility` is the learned Wilson-score from feedback.
+/// - `verification_weight` (v0.6.1) damps unverified outcomes.
+/// - `recency` (v0.5+) decays by `recency_halflife_days`.
+/// - `inv_freq` (v0.7.7) penalizes already-heavily-retrieved episodes
+///   so the brain doesn't keep recommending the same five things.
+pub fn salience_score(episode: &Episode, config: &Config) -> f32 {
+    let utility = episode.utility.calculate_score();
+    let verification = episode.outcome.verification.weight();
+    let recency = calculate_recency_score(episode, config.retrieval.recency_halflife_days);
+    let denom = config.retrieval.salience_freq_normalizer.max(1.0);
+    let inv_freq = 1.0 / (1.0 + episode.retrieval_history.len() as f32 / denom);
+    utility * verification * recency * inv_freq
+}
+
+/// Blend similarity and salience with config-driven weights.
+///
+/// `sim_w` and `sal_w` are passed explicitly so the hybrid path can use
+/// its own (more similarity-biased) weights — RRF-normalized scores have
+/// a compressed distribution that needs different calibration than raw
+/// cosine.
+fn combined_score(similarity: f32, salience: f32, sim_w: f32, sal_w: f32) -> f32 {
+    let total = sim_w + sal_w;
     if total == 0.0 {
         return 0.0;
     }
-    (sim_w * similarity + util_w * utility * verification_weight + rec_w * recency) / total
+    (sim_w * similarity + sal_w * salience) / total
 }
 
 /// Calculate text-based similarity between query and episode
@@ -664,44 +684,98 @@ mod tests {
 
     #[test]
     fn test_combined_score_normalization() {
+        // sim=0.8, salience=0.6, sim_w=0.3, sal_w=0.7
+        // = (0.3 * 0.8 + 0.7 * 0.6) / 1.0 = 0.66
+        let score = combined_score(0.8, 0.6, 0.3, 0.7);
+        assert!((score - 0.66).abs() < 0.01, "expected ~0.66, got {}", score);
+    }
+
+    #[test]
+    fn test_combined_score_handles_zero_weights() {
+        // Both weights zero → return 0 (no division by zero).
+        let score = combined_score(0.8, 0.6, 0.0, 0.0);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_combined_score_weights_blend_linearly() {
+        // sim_w=1, sal_w=0 → pure similarity
+        let s = combined_score(0.42, 0.99, 1.0, 0.0);
+        assert!((s - 0.42).abs() < 1e-6);
+        // sim_w=0, sal_w=1 → pure salience
+        let s = combined_score(0.42, 0.99, 0.0, 1.0);
+        assert!((s - 0.99).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_salience_score_default_episode() {
+        // A fresh Untested episode with no retrievals:
+        //   utility = 0.5 (Wilson default for 0/0)
+        //   verification = 0.30 (Untested)
+        //   recency ≈ 1.0 (just created)
+        //   inv_freq = 1.0 (0 retrievals)
+        // → ~0.5 * 0.30 * 1.0 * 1.0 = 0.15
         let config = Config::default();
-
-        // With verification=1.0 (fully validated), this matches the
-        // pre-v0.6.1 formula: (0.3*0.8 + 0.7*0.6 + 0.0*1.0) / 1.0 = 0.66
-        let score = combined_score(0.8, 0.6, 1.0, 1.0, &config);
+        let ep = Episode::new("p".into(), "test".into());
+        let s = salience_score(&ep, &config);
         assert!(
-            (score - 0.66).abs() < 0.01,
-            "Default weights, verif=1.0: expected ~0.66, got {}",
-            score
-        );
-
-        // With recency enabled, scores should normalize
-        let mut config2 = Config::default();
-        config2.retrieval.recency_weight = 0.2;
-        let score2 = combined_score(0.8, 0.6, 1.0, 1.0, &config2);
-        // (0.3*0.8 + 0.7*0.6*1.0 + 0.2*1.0) / (0.3+0.7+0.2) = 0.7167
-        assert!(
-            (score2 - 0.7167).abs() < 0.01,
-            "With recency, verif=1.0: expected ~0.717, got {}",
-            score2
+            (s - 0.15).abs() < 0.01,
+            "fresh untested episode should ~0.15, got {s}"
         );
     }
 
     #[test]
-    fn test_combined_score_verification_dampens_utility() {
+    fn test_salience_inv_freq_penalizes_heavy_retrieval() {
         let config = Config::default();
-        // Same sim+utility, lower verification ⇒ lower score (utility shrinks)
-        let high = combined_score(0.5, 1.0, 0.0, 1.0, &config);
-        let low = combined_score(0.5, 1.0, 0.0, 0.3, &config);
+        let mut ep = Episode::new("p".into(), "test".into());
+
+        // 0 retrievals → inv_freq = 1.0
+        let s_fresh = salience_score(&ep, &config);
+
+        // 100 retrievals → inv_freq = 1/(1 + 100/100) = 0.5
+        ep.retrieval_history = (0..100)
+            .map(|_| crate::episode::RetrievalRecord {
+                timestamp: chrono::Utc::now(),
+                project: "p".into(),
+                task_description: "x".into(),
+                was_helpful: None,
+            })
+            .collect();
+        let s_heavy = salience_score(&ep, &config);
+
         assert!(
-            low < high,
-            "untested should rank lower: low={low} high={high}"
+            s_heavy < s_fresh,
+            "heavy retrieval should rank lower: heavy={s_heavy} fresh={s_fresh}"
         );
-        // Sanity: similarity contribution alone is sim_w * sim = 0.3 * 0.5 = 0.15
-        // High: 0.15 + 0.7*1.0*1.0 = 0.85
-        // Low:  0.15 + 0.7*1.0*0.3 = 0.36
-        assert!((high - 0.85).abs() < 0.01, "got {high}");
-        assert!((low - 0.36).abs() < 0.01, "got {low}");
+        // 0.5 is the design point — verify within a small tolerance.
+        assert!(
+            (s_heavy / s_fresh - 0.5).abs() < 0.01,
+            "100 retrievals should halve salience, ratio={}",
+            s_heavy / s_fresh
+        );
+    }
+
+    #[test]
+    fn test_salience_validated_outranks_untested() {
+        use crate::episode::VerificationState;
+        let config = Config::default();
+        let mut ep_untested = Episode::new("p".into(), "test".into());
+        let mut ep_validated = Episode::new("p".into(), "test".into());
+        ep_validated.outcome.verification = VerificationState::ValidatedCrossProject {
+            evidence_episodes: vec!["a".into(), "b".into()],
+        };
+        // Match utility so the only difference is verification.
+        ep_untested.utility.score = Some(0.5);
+        ep_validated.utility.score = Some(0.5);
+
+        let s_untested = salience_score(&ep_untested, &config);
+        let s_validated = salience_score(&ep_validated, &config);
+        // ValidatedCrossProject weight is 1.0, Untested is 0.30 →
+        // validated should be ~3.3× untested.
+        assert!(
+            s_validated > s_untested * 3.0,
+            "validated should rank ≫ untested: validated={s_validated} untested={s_untested}"
+        );
     }
 
     fn ids(s: &[&str]) -> Vec<String> {

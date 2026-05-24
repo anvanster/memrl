@@ -176,12 +176,28 @@ pub struct RetrievalConfig {
     /// MMR lambda: 0.0 = pure diversity, 1.0 = pure relevance
     #[serde(default = "default_mmr_lambda")]
     pub mmr_lambda: f32,
-    /// Weight for recency in scoring (0.0 = off, opt-in)
+    /// Weight for recency in scoring (0.0 = off, opt-in).
+    /// **Deprecated in v0.7.7** — recency is now folded into the
+    /// `salience` term. Kept for backward-compat deserialization;
+    /// new code reads `salience_weight` instead. Removing this field
+    /// would break old config.toml files.
     #[serde(default = "default_recency_weight")]
     pub recency_weight: f32,
-    /// Half-life for recency decay in days
+    /// Half-life for recency decay in days. Still used by `salience_score`.
     #[serde(default = "default_recency_halflife_days")]
     pub recency_halflife_days: f32,
+    /// v0.7.7: weight of the unified `salience` term in `combined_score`.
+    /// Salience = utility × verification × recency × inv_freq. Default
+    /// 0.7 keeps the same blend ratio the old `utility_weight = 0.7`
+    /// + `similarity_weight = 0.3` combination produced.
+    #[serde(default = "default_salience_weight")]
+    pub salience_weight: f32,
+    /// v0.7.7: denominator for the inv_freq factor — at
+    /// `retrieval_history.len() == salience_freq_normalizer`, the
+    /// inv_freq factor is 0.5. Smaller values penalize heavy retrieval
+    /// harder.
+    #[serde(default = "default_salience_freq_normalizer")]
+    pub salience_freq_normalizer: f32,
 }
 
 impl Default for RetrievalConfig {
@@ -198,6 +214,8 @@ impl Default for RetrievalConfig {
             mmr_lambda: default_mmr_lambda(),
             recency_weight: default_recency_weight(),
             recency_halflife_days: default_recency_halflife_days(),
+            salience_weight: default_salience_weight(),
+            salience_freq_normalizer: default_salience_freq_normalizer(),
         }
     }
 }
@@ -350,6 +368,18 @@ fn default_recency_weight() -> f32 {
 
 fn default_recency_halflife_days() -> f32 {
     30.0
+}
+
+fn default_salience_weight() -> f32 {
+    // Matches the pre-v0.7.7 utility_weight default. Combined with
+    // similarity_weight=0.3 this preserves the historical 70/30 blend.
+    0.7
+}
+
+fn default_salience_freq_normalizer() -> f32 {
+    // At retrieval_count == 100, inv_freq drops to 0.5 (a 50% rank
+    // damping for very heavily retrieved episodes).
+    100.0
 }
 
 fn default_rrf_k() -> f32 {
