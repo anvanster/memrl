@@ -87,8 +87,12 @@ impl AnthropicClient {
 
     /// Low-level completion call: send a single user message under the
     /// given system prompt and return the assistant's text. Used by
-    /// dream-cycle phases that handle their own JSON parsing.
-    pub async fn raw_completion_haiku(
+    /// dream-cycle phases (triage / reflect / patterns) that handle their
+    /// own JSON parsing. The model is whatever this client was constructed
+    /// with — pair with `AnthropicClient::with_model("claude-sonnet-4-6")`
+    /// for authorship phases, `with_model("claude-haiku-4-5-20251001")`
+    /// for gating.
+    pub async fn raw_completion(
         &self,
         system: &str,
         user: &str,

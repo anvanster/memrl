@@ -240,6 +240,28 @@ pub async fn triage_day(
     budget: Option<&CostBudget>,
     force: bool,
 ) -> Result<(TriageVerdict, bool /* from_cache */)> {
+    triage_day_with_model(
+        date,
+        episodes,
+        store,
+        budget,
+        force,
+        "claude-haiku-4-5-20251001",
+    )
+    .await
+}
+
+/// Same as `triage_day` but with an explicit model name. The dream phase
+/// and CLI both pass `config.dream.triage_model` here so model selection
+/// stays in one place.
+pub async fn triage_day_with_model(
+    date: &NaiveDate,
+    episodes: &[Episode],
+    store: &TriageStore,
+    budget: Option<&CostBudget>,
+    force: bool,
+    model: &str,
+) -> Result<(TriageVerdict, bool /* from_cache */)> {
     let hash = captures_hash(episodes);
 
     if !force && let Some(cached) = store.get(date, &hash).await? {
@@ -263,7 +285,7 @@ pub async fn triage_day(
     }
 
     let user_msg = build_triage_user_message(date, episodes);
-    let client = AnthropicClient::new()?;
+    let client = AnthropicClient::with_model(model)?;
     let verdict = call_haiku_for_verdict(&client, &user_msg)
         .await
         .context("Haiku triage call failed")?;
@@ -273,9 +295,7 @@ pub async fn triage_day(
 
 /// Wraps the `reqwest`-based Anthropic client with the triage prompt.
 async fn call_haiku_for_verdict(client: &AnthropicClient, user: &str) -> Result<TriageVerdict> {
-    let raw = client
-        .raw_completion_haiku(TRIAGE_SYSTEM, user, 200)
-        .await?;
+    let raw = client.raw_completion(TRIAGE_SYSTEM, user, 200).await?;
     // The model usually emits clean JSON, but be tolerant of leading/
     // trailing whitespace and stray markdown fences.
     let trimmed = strip_json_fences(&raw);

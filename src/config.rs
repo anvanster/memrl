@@ -23,9 +23,7 @@ pub struct Config {
     pub dream: DreamConfig,
 }
 
-/// Settings for the v0.7+ dream cycle. v0.7.1 only exposes the
-/// stability-window threshold; later releases add cost caps,
-/// per-phase enable flags, and triage settings.
+/// Settings for the v0.7+ dream cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DreamConfig {
     /// Days of `Merged` time before `verify_advance` promotes an
@@ -37,6 +35,16 @@ pub struct DreamConfig {
     /// Overridable with `--max-usd`. Free phases ignore this.
     #[serde(default = "default_dream_max_usd")]
     pub default_max_usd: f32,
+    /// Anthropic model used by `triage_day` (v0.7.2). Cheap + fast.
+    #[serde(default = "default_triage_model")]
+    pub triage_model: String,
+    /// Anthropic model used by `author_reflection` (v0.7.3). Higher
+    /// quality, more expensive (~$0.05/reflection vs ~$0.001/triage).
+    #[serde(default = "default_reflect_model")]
+    pub reflect_model: String,
+    /// Max output tokens for a reflection body. 1500 ≈ ~1000 words.
+    #[serde(default = "default_reflect_max_tokens")]
+    pub reflect_max_tokens: u32,
 }
 
 impl Default for DreamConfig {
@@ -44,6 +52,9 @@ impl Default for DreamConfig {
         Self {
             stable_threshold_days: default_stable_threshold_days(),
             default_max_usd: default_dream_max_usd(),
+            triage_model: default_triage_model(),
+            reflect_model: default_reflect_model(),
+            reflect_max_tokens: default_reflect_max_tokens(),
         }
     }
 }
@@ -345,6 +356,20 @@ fn default_stable_threshold_days() -> u32 {
 fn default_dream_max_usd() -> f32 {
     // v0.7.1 phases are free; this default exists for v0.7.2 onward.
     0.50
+}
+
+fn default_triage_model() -> String {
+    // Haiku 4.5: cheap + fast, perfect for gating.
+    "claude-haiku-4-5-20251001".to_string()
+}
+
+fn default_reflect_model() -> String {
+    // Sonnet 4.6: highest quality / cost ratio for authorship.
+    "claude-sonnet-4-6".to_string()
+}
+
+fn default_reflect_max_tokens() -> u32 {
+    1500
 }
 
 fn default_consolidation_threshold() -> f32 {

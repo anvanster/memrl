@@ -27,6 +27,7 @@ mod indexer;
 mod jobs;
 mod keyword;
 mod llm;
+mod reflect;
 mod retrieve;
 mod stats;
 mod store;
@@ -185,6 +186,29 @@ enum Commands {
     /// Read-only health check (index, coverage, links, eval, queue)
     Doctor {
         /// Emit machine-readable JSON instead of the colored summary
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Author a reflection page for a single day. Runs Haiku triage
+    /// first; if score < 0.5 the call is skipped. Otherwise Sonnet writes
+    /// a short reflection page that goes into ~/.tempera/reflections/
+    /// and an SQLite mirror.
+    Reflect {
+        /// Day to reflect on (YYYY-MM-DD). Defaults to yesterday (the
+        /// natural target for a nightly cron — today is incomplete).
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Skip the cache and re-author even if a reflection exists.
+        #[arg(long)]
+        force: bool,
+
+        /// Plan only: show triage signals without making the Sonnet call.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the reflection record as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -438,6 +462,103 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Reflect {
+            date,
+            force,
+            dry_run,
+            json,
+        } => {
+            let target_date = match date.as_deref() {
+                Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .map_err(|e| anyhow::anyhow!("invalid --date '{s}': {e}"))?,
+                None => (chrono::Utc::now() - chrono::Duration::days(1)).date_naive(),
+            };
+            let store = store::EpisodeStore::new()?;
+            let day_eps: Vec<_> = store
+                .list_all()?
+                .into_iter()
+                .filter(|e| e.timestamp_start.date_naive() == target_date)
+                .collect();
+            let reflect_store = reflect::ReflectionStore::open_default().await?;
+            let id = reflect::Reflection::id_for(&target_date, None);
+            if !force && let Some(existing) = reflect_store.get(&id).await? {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&existing)?);
+                } else {
+                    println!(
+                        "Reflection {} already exists ({} citations). Pass --force to re-author.",
+                        existing.id,
+                        existing.citations.len()
+                    );
+                }
+                return Ok(());
+            }
+
+            let triage_store = triage::TriageStore::open_default().await?;
+            let budget = dream::CostBudget::new(config.dream.default_max_usd);
+            let (verdict, from_cache) = triage::triage_day_with_model(
+                &target_date,
+                &day_eps,
+                &triage_store,
+                Some(&budget),
+                false,
+                &config.dream.triage_model,
+            )
+            .await?;
+
+            if dry_run {
+                let plan = serde_json::json!({
+                    "date": target_date,
+                    "episode_count": day_eps.len(),
+                    "triage": &verdict,
+                    "triage_from_cache": from_cache,
+                    "would_author": verdict.worth_synthesizing(),
+                    "estimated_cost_usd": if verdict.worth_synthesizing() {
+                        reflect::REFLECT_ESTIMATED_COST_USD
+                    } else {
+                        0.0
+                    },
+                });
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+                return Ok(());
+            }
+
+            if !verdict.worth_synthesizing() {
+                println!(
+                    "Triage score {:.2} below threshold — skipping authorship. \
+                     Use --force to author anyway.",
+                    verdict.score
+                );
+                return Ok(());
+            }
+
+            let reflection = reflect::author_reflection(
+                &target_date,
+                &day_eps,
+                &verdict.signals,
+                verdict.score,
+                &config,
+                Some(&budget),
+                &reflect_store,
+            )
+            .await?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&reflection)?);
+            } else {
+                println!();
+                println!("Authored reflection: {}", reflection.id);
+                println!("  citations: {}", reflection.citations.join(", "));
+                println!("  signals:   {}", reflection.signals.join(", "));
+                println!("  model:     {}", reflection.model);
+                println!("  sidecar:   ~/.tempera/reflections/{}.md", reflection.id);
+                println!();
+                println!("--- body ---");
+                println!("{}", reflection.body);
+                println!();
+            }
         }
 
         Commands::Triage { date, force, json } => {

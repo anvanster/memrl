@@ -29,7 +29,9 @@ use std::time::Instant;
 
 use crate::config::Config;
 use crate::episode::VerificationState;
+use crate::reflect;
 use crate::store::EpisodeStore;
+use crate::triage;
 
 /// All dream phases that exist today. Add a variant + a match arm in
 /// `dispatch` + a row in `dependency_chain` to introduce a new one.
@@ -40,6 +42,9 @@ pub enum PhaseName {
     VerifyAdvance,
     /// Scope-aware utility decay (per `episode::decay_rate_per_day`).
     Decay,
+    /// Author a daily reflection page when triage approves (v0.7.3+).
+    /// Runs Haiku triage internally; skips below-threshold days.
+    Reflect,
 }
 
 impl PhaseName {
@@ -47,6 +52,7 @@ impl PhaseName {
         match self {
             Self::VerifyAdvance => "verify_advance",
             Self::Decay => "decay",
+            Self::Reflect => "reflect",
         }
     }
 }
@@ -57,7 +63,10 @@ impl FromStr for PhaseName {
         Ok(match s.to_lowercase().replace('-', "_").as_str() {
             "verify_advance" => Self::VerifyAdvance,
             "decay" => Self::Decay,
-            other => anyhow::bail!("unknown phase '{other}' (expected: verify_advance | decay)"),
+            "reflect" => Self::Reflect,
+            other => anyhow::bail!(
+                "unknown phase '{other}' (expected: verify_advance | decay | reflect)"
+            ),
         })
     }
 }
@@ -71,7 +80,11 @@ impl std::fmt::Display for PhaseName {
 /// Phase execution order. Full-cycle runs walk this list top-to-bottom;
 /// adding a phase = appending here. Dependencies are implicit in the
 /// list order — if A reads what B wrote, A goes after B.
-const FULL_CYCLE_ORDER: &[PhaseName] = &[PhaseName::VerifyAdvance, PhaseName::Decay];
+const FULL_CYCLE_ORDER: &[PhaseName] = &[
+    PhaseName::VerifyAdvance,
+    PhaseName::Decay,
+    PhaseName::Reflect,
+];
 
 pub fn all_phases() -> &'static [PhaseName] {
     FULL_CYCLE_ORDER
@@ -186,20 +199,33 @@ fn estimate(phase: PhaseName) -> CostEstimate {
     match phase {
         PhaseName::VerifyAdvance => CostEstimate::free(2),
         PhaseName::Decay => CostEstimate::free(5),
+        // Reflect estimate covers one Sonnet authorship + one Haiku triage.
+        // Days that triage skips cost only the triage call (~$0.002).
+        PhaseName::Reflect => CostEstimate {
+            usd: reflect::REFLECT_ESTIMATED_COST_USD + triage::TRIAGE_ESTIMATED_COST_USD,
+            estimated_seconds: 20,
+        },
     }
 }
 
 async fn dispatch(phase: PhaseName, ctx: &PhaseContext<'_>) -> Result<PhaseReport> {
     let started = Instant::now();
-    let (status, summary) = match phase {
-        PhaseName::VerifyAdvance => run_verify_advance(ctx)?,
-        PhaseName::Decay => run_decay(ctx).await?,
+    let (status, summary, cost) = match phase {
+        PhaseName::VerifyAdvance => {
+            let (s, m) = run_verify_advance(ctx)?;
+            (s, m, 0.0)
+        }
+        PhaseName::Decay => {
+            let (s, m) = run_decay(ctx).await?;
+            (s, m, 0.0)
+        }
+        PhaseName::Reflect => run_reflect(ctx).await?,
     };
     Ok(PhaseReport {
         name: phase,
         status,
         summary,
-        cost_usd: 0.0,
+        cost_usd: cost,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
 }
@@ -353,6 +379,98 @@ async fn run_decay(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String)> {
     Ok((PhaseStatus::Ok, summary))
 }
 
+/// v0.7.3: reflect on yesterday's captures.
+///
+/// Triages first (Haiku) — if score < MIN_SYNTHESIZE_SCORE, skip the
+/// expensive Sonnet call. If a reflection already exists for the day,
+/// skip (idempotent). Otherwise author + persist.
+///
+/// "Yesterday" is the natural target for a nightly cron: today's
+/// captures aren't done yet. CLI lets users override the date.
+async fn run_reflect(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f32)> {
+    let target_date = (Utc::now() - chrono::Duration::days(1)).date_naive();
+    let all = ctx.store.list_all()?;
+    let day_eps: Vec<_> = all
+        .into_iter()
+        .filter(|e| e.timestamp_start.date_naive() == target_date)
+        .collect();
+
+    // Skip if no captures.
+    if day_eps.is_empty() {
+        return Ok((
+            PhaseStatus::Skipped,
+            format!("no captures on {target_date}"),
+            0.0,
+        ));
+    }
+
+    // Skip if we've already authored a reflection for this day.
+    let reflect_store = reflect::ReflectionStore::open_default().await?;
+    let existing_id = reflect::Reflection::id_for(&target_date, None);
+    if reflect_store.get(&existing_id).await?.is_some() {
+        return Ok((
+            PhaseStatus::Skipped,
+            format!("reflection already exists for {target_date}"),
+            0.0,
+        ));
+    }
+
+    // Triage.
+    let triage_store = triage::TriageStore::open_default().await?;
+    let (verdict, from_cache) = triage::triage_day_with_model(
+        &target_date,
+        &day_eps,
+        &triage_store,
+        Some(ctx.budget),
+        false,
+        &ctx.config.dream.triage_model,
+    )
+    .await
+    .context("reflect: triage failed")?;
+    let triage_cost = if from_cache {
+        0.0
+    } else {
+        triage::TRIAGE_ESTIMATED_COST_USD
+    };
+
+    if !verdict.worth_synthesizing() {
+        return Ok((
+            PhaseStatus::Skipped,
+            format!(
+                "triage said skip ({} ep, score {:.2}, {} signals)",
+                day_eps.len(),
+                verdict.score,
+                verdict.signals.len()
+            ),
+            triage_cost,
+        ));
+    }
+
+    // Author.
+    let reflection = reflect::author_reflection(
+        &target_date,
+        &day_eps,
+        &verdict.signals,
+        verdict.score,
+        ctx.config,
+        Some(ctx.budget),
+        &reflect_store,
+    )
+    .await
+    .context("reflect: authorship failed")?;
+    let total_cost = triage_cost + reflect::REFLECT_ESTIMATED_COST_USD;
+    Ok((
+        PhaseStatus::Ok,
+        format!(
+            "authored {} ({} citations, triage {:.2})",
+            reflection.id,
+            reflection.citations.len(),
+            verdict.score
+        ),
+        total_cost,
+    ))
+}
+
 // ===== Output =====
 
 pub fn print_cycle(report: &CycleReport, dry: bool) {
@@ -455,10 +573,20 @@ mod tests {
     }
 
     #[test]
-    fn estimate_returns_free_for_v071_phases() {
-        for p in all_phases() {
+    fn estimate_free_phases_remain_free() {
+        for p in &[PhaseName::VerifyAdvance, PhaseName::Decay] {
             let e = estimate(*p);
-            assert_eq!(e.usd, 0.0, "v0.7.1 phases should be free, got {p:?}");
+            assert_eq!(e.usd, 0.0, "free phase {p:?} regressed to paid");
+        }
+    }
+
+    #[test]
+    fn estimate_paid_phases_have_positive_cost() {
+        // Reflect (v0.7.3+) is the first paid phase. Catches regressions
+        // if someone accidentally zeroes its estimate.
+        for p in &[PhaseName::Reflect] {
+            let e = estimate(*p);
+            assert!(e.usd > 0.0, "paid phase {p:?} has zero estimate");
         }
     }
 }
