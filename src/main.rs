@@ -17,6 +17,7 @@ use clap::{Args, Parser, Subcommand};
 mod backup;
 mod capture;
 mod config;
+mod doctor;
 mod episode;
 mod eval;
 mod feedback;
@@ -177,6 +178,13 @@ enum Commands {
 
     /// Snapshot or restore the tempera data directory
     Backup(BackupArgs),
+
+    /// Read-only health check (index, coverage, links, eval, queue)
+    Doctor {
+        /// Emit machine-readable JSON instead of the colored summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -360,6 +368,19 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Doctor { json } => {
+            let report = doctor::check().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                doctor::print_human(&report);
+            }
+            // Non-zero exit when health is poor, so CI can gate on it later.
+            if report.score < 50 {
+                std::process::exit(1);
+            }
         }
 
         Commands::Backup(args) => {

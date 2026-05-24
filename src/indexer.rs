@@ -87,7 +87,7 @@ impl EpisodeIndexer {
     }
 
     /// Get the vector database path
-    fn db_path() -> Result<PathBuf> {
+    pub(crate) fn db_path() -> Result<PathBuf> {
         let data_dir = Config::data_dir()?;
         Ok(data_dir.join("vectors"))
     }
@@ -99,7 +99,7 @@ impl EpisodeIndexer {
     }
 
     /// Get the keyword index path (~/.tempera/keyword/index.json)
-    fn keyword_index_path() -> Result<PathBuf> {
+    pub(crate) fn keyword_index_path() -> Result<PathBuf> {
         let data_dir = Config::data_dir()?;
         Ok(data_dir.join("keyword").join("index.json"))
     }
@@ -470,6 +470,44 @@ pub struct IndexStats {
     pub total_indexed: usize,
     pub embedding_dim: usize,
     pub model_name: String,
+}
+
+/// Vector index location, exposed so callers like `doctor` can stat the dir
+/// without instantiating an `EpisodeIndexer` (which loads the embedding model).
+pub fn vector_index_path() -> Result<PathBuf> {
+    EpisodeIndexer::db_path()
+}
+
+/// Keyword index file location, same rationale as above.
+pub fn keyword_index_file() -> Result<PathBuf> {
+    EpisodeIndexer::keyword_index_path()
+}
+
+/// Inspect the vector index without loading the embedding model. Returns
+/// `(item_count, has_index)`; `has_index` is false when the directory exists
+/// but no vectrust index has been created yet.
+pub async fn inspect_vector_index() -> Result<(usize, bool)> {
+    let path = vector_index_path()?;
+    if !path.exists() {
+        return Ok((0, false));
+    }
+    let index = LocalIndex::new(&path, Some("episodes".into()))
+        .context("Failed to open vector index for inspection")?;
+    if !index.is_index_created().await {
+        return Ok((0, false));
+    }
+    let stats = index
+        .get_stats()
+        .await
+        .context("Failed to get index stats")?;
+    Ok((stats.items, true))
+}
+
+/// Inspect the keyword index without loading it into the indexer struct.
+pub fn inspect_keyword_index() -> Result<usize> {
+    let path = keyword_index_file()?;
+    let idx = KeywordIndex::load(&path)?.unwrap_or_default();
+    Ok(idx.doc_count())
 }
 
 #[cfg(test)]
