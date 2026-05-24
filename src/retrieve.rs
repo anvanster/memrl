@@ -101,7 +101,8 @@ pub async fn try_vector_search(
         if let Ok(episode) = store.load(&result.id) {
             let utility = episode.utility.calculate_score();
             let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
-            let combined = combined_score(result.similarity_score, utility, recency, config);
+            let verif = episode.outcome.verification.weight();
+            let combined = combined_score(result.similarity_score, utility, recency, verif, config);
 
             episodes.push(ScoredEpisode {
                 episode,
@@ -160,7 +161,8 @@ pub async fn try_keyword_search(
             let sim = hit.score / max_score;
             let utility = episode.utility.calculate_score();
             let recency = calculate_recency_score(&episode, config.retrieval.recency_halflife_days);
-            let combined = combined_score(sim, utility, recency, config);
+            let verif = episode.outcome.verification.weight();
+            let combined = combined_score(sim, utility, recency, verif, config);
             Some(ScoredEpisode {
                 episode,
                 similarity_score: sim,
@@ -239,11 +241,13 @@ pub async fn try_hybrid_search(
             // Normalize RRF to [0, 1] within this result set.
             let sim_normalized = rrf_score / max_rrf;
             let utility = episode.utility.calculate_score();
+            let verif = episode.outcome.verification.weight();
             // Hybrid-specific blend: RRF dominates (its rank carries both
-            // lexical and semantic signal), utility is a smaller reweight.
+            // lexical and semantic signal), utility is a smaller reweight,
+            // damped by verification (Untested→0.30, ValidatedCrossProject→1.0).
             // Recency is intentionally omitted here — opt in via config if
             // you want it back in hybrid ranking.
-            let combined = (sim_w * sim_normalized + util_w * utility) / total_w;
+            let combined = (sim_w * sim_normalized + util_w * utility * verif) / total_w;
             // Surface true cosine sim when this doc came through the vector
             // path; fall back to RRF-normalized score otherwise.
             let surface_sim = vector_sim.get(&id).copied().unwrap_or(sim_normalized);
@@ -307,7 +311,8 @@ pub fn retrieve_episodes_text(
             let similarity = calculate_text_similarity(query, &ep);
             let utility = ep.utility.calculate_score();
             let recency = calculate_recency_score(&ep, config.retrieval.recency_halflife_days);
-            let combined = combined_score(similarity, utility, recency, config);
+            let verif = ep.outcome.verification.weight();
+            let combined = combined_score(similarity, utility, recency, verif, config);
 
             ScoredEpisode {
                 episode: ep,
@@ -343,7 +348,17 @@ fn calculate_recency_score(episode: &Episode, halflife_days: f32) -> f32 {
 }
 
 /// Combine similarity, utility, and recency scores with weight normalization.
-fn combined_score(similarity: f32, utility: f32, recency: f32, config: &Config) -> f32 {
+///
+/// `verification_weight` multiplies the utility contribution — captures with
+/// no external verification (Untested = 0.30) get their utility damped
+/// relative to merged-and-stable ones (1.0). See `VerificationState::weight`.
+fn combined_score(
+    similarity: f32,
+    utility: f32,
+    recency: f32,
+    verification_weight: f32,
+    config: &Config,
+) -> f32 {
     let sim_w = config.retrieval.similarity_weight;
     let util_w = config.retrieval.utility_weight;
     let rec_w = config.retrieval.recency_weight;
@@ -351,7 +366,7 @@ fn combined_score(similarity: f32, utility: f32, recency: f32, config: &Config) 
     if total == 0.0 {
         return 0.0;
     }
-    (sim_w * similarity + util_w * utility + rec_w * recency) / total
+    (sim_w * similarity + util_w * utility * verification_weight + rec_w * recency) / total
 }
 
 /// Calculate text-based similarity between query and episode
@@ -634,25 +649,42 @@ mod tests {
     fn test_combined_score_normalization() {
         let config = Config::default();
 
-        // With default weights (sim=0.3, util=0.7, rec=0.0), should match old behavior
-        let score = combined_score(0.8, 0.6, 1.0, &config);
-        // (0.3*0.8 + 0.7*0.6 + 0.0*1.0) / (0.3+0.7+0.0) = (0.24+0.42)/1.0 = 0.66
+        // With verification=1.0 (fully validated), this matches the
+        // pre-v0.6.1 formula: (0.3*0.8 + 0.7*0.6 + 0.0*1.0) / 1.0 = 0.66
+        let score = combined_score(0.8, 0.6, 1.0, 1.0, &config);
         assert!(
             (score - 0.66).abs() < 0.01,
-            "Default weights: expected ~0.66, got {}",
+            "Default weights, verif=1.0: expected ~0.66, got {}",
             score
         );
 
         // With recency enabled, scores should normalize
         let mut config2 = Config::default();
         config2.retrieval.recency_weight = 0.2;
-        let score2 = combined_score(0.8, 0.6, 1.0, &config2);
-        // (0.3*0.8 + 0.7*0.6 + 0.2*1.0) / (0.3+0.7+0.2) = (0.24+0.42+0.2)/1.2 = 0.7167
+        let score2 = combined_score(0.8, 0.6, 1.0, 1.0, &config2);
+        // (0.3*0.8 + 0.7*0.6*1.0 + 0.2*1.0) / (0.3+0.7+0.2) = 0.7167
         assert!(
             (score2 - 0.7167).abs() < 0.01,
-            "With recency: expected ~0.717, got {}",
+            "With recency, verif=1.0: expected ~0.717, got {}",
             score2
         );
+    }
+
+    #[test]
+    fn test_combined_score_verification_dampens_utility() {
+        let config = Config::default();
+        // Same sim+utility, lower verification ⇒ lower score (utility shrinks)
+        let high = combined_score(0.5, 1.0, 0.0, 1.0, &config);
+        let low = combined_score(0.5, 1.0, 0.0, 0.3, &config);
+        assert!(
+            low < high,
+            "untested should rank lower: low={low} high={high}"
+        );
+        // Sanity: similarity contribution alone is sim_w * sim = 0.3 * 0.5 = 0.15
+        // High: 0.15 + 0.7*1.0*1.0 = 0.85
+        // Low:  0.15 + 0.7*1.0*0.3 = 0.36
+        assert!((high - 0.85).abs() < 0.01, "got {high}");
+        assert!((low - 0.36).abs() < 0.01, "got {low}");
     }
 
     fn ids(s: &[&str]) -> Vec<String> {

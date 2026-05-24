@@ -185,6 +185,30 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Move an episode's verification state forward (manual; future
+    /// versions add git/test hooks that do this automatically)
+    AdvanceVerification {
+        /// Episode id (full or 8-char short prefix)
+        #[arg(long)]
+        episode: String,
+
+        /// Target state: untested | tests_pass | merged | stable_no_revert
+        #[arg(long)]
+        to: String,
+
+        /// Commit SHA (required when --to merged)
+        #[arg(long)]
+        commit: Option<String>,
+
+        /// Test run id (required when --to tests_pass)
+        #[arg(long)]
+        run_id: Option<String>,
+
+        /// Days stable (used when --to stable_no_revert; default 1)
+        #[arg(long)]
+        days: Option<u32>,
+    },
 }
 
 #[derive(Args)]
@@ -370,6 +394,27 @@ async fn main() -> Result<()> {
             jobs::run_daemon(&queue, &config).await?;
         }
 
+        Commands::AdvanceVerification {
+            episode,
+            to,
+            commit,
+            run_id,
+            days,
+        } => {
+            let new_state = parse_verification_state(&to, commit, run_id, days)?;
+            let store = store::EpisodeStore::new()?;
+            let mut ep = store.load(&episode)?;
+            let old_label = ep.outcome.verification.label();
+            ep.set_verification(new_state.clone());
+            store.update(&ep)?;
+            println!(
+                "{} {} → {}",
+                &ep.id[..8.min(ep.id.len())],
+                old_label,
+                new_state.label()
+            );
+        }
+
         Commands::Doctor { json } => {
             let report = doctor::check().await?;
             if json {
@@ -531,6 +576,40 @@ fn run_prune(
 
     println!("\n✅ Prune complete!");
     Ok(())
+}
+
+/// Parse `--to <state>` plus the per-state extras into a `VerificationState`.
+fn parse_verification_state(
+    to: &str,
+    commit: Option<String>,
+    run_id: Option<String>,
+    days: Option<u32>,
+) -> Result<episode::VerificationState> {
+    use episode::VerificationState;
+    let now = chrono::Utc::now();
+    let normalized = to.to_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "untested" => Ok(VerificationState::Untested),
+        "tests_pass" => {
+            let run_id =
+                run_id.ok_or_else(|| anyhow::anyhow!("--run-id required for tests_pass"))?;
+            Ok(VerificationState::TestsPass { run_id, at: now })
+        }
+        "merged" => {
+            let commit = commit.ok_or_else(|| anyhow::anyhow!("--commit required for merged"))?;
+            Ok(VerificationState::Merged { commit, at: now })
+        }
+        "stable_no_revert" => {
+            let days = days.unwrap_or(1);
+            Ok(VerificationState::StableNoRevert { days, since: now })
+        }
+        "validated_cross_project" => anyhow::bail!(
+            "validated_cross_project is set automatically by the dream cycle (future v0.7), not manually"
+        ),
+        other => anyhow::bail!(
+            "unknown verification state: '{other}' (expected: untested | tests_pass | merged | stable_no_revert)"
+        ),
+    }
 }
 
 /// Clone `config` with `retrieval.mode` replaced if `mode_str` is set.

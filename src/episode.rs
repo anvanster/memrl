@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 /// Current on-disk schema version for `Episode`. Bump when adding fields that
 /// cannot be filled by serde defaults — then add a `migrate_v{n}_to_v{n+1}`
 /// arm in `Episode::migrate`. See the v0.5.4 roadmap entry.
-pub const CURRENT_EPISODE_VERSION: u32 = 1;
+///
+/// History:
+///   v1 — initial stable shape from v0.4.0.
+///   v2 — added `Outcome.verification` (v0.6.1).
+pub const CURRENT_EPISODE_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     // Old episodes on disk pre-date the schema_version field. They are
@@ -49,18 +53,15 @@ impl Episode {
     ///
     /// Episodes from a *future* version (downgrade scenario) bail; the safer
     /// failure mode is "refuse to load" rather than "drop fields silently".
-    pub fn migrate(self) -> Result<Self> {
-        // No real upgrade paths exist yet — every episode on disk is already
-        // v1. When CURRENT_EPISODE_VERSION bumps to 2, restore the
-        // `while self.schema_version < CURRENT_EPISODE_VERSION { ... }` loop
-        // with a `1 => migrate_v1_to_v2(self)?` arm. Until then there's
-        // nothing to walk forward.
-        if self.schema_version < CURRENT_EPISODE_VERSION {
-            bail!(
-                "no migration from episode schema v{} to v{}",
-                self.schema_version,
-                CURRENT_EPISODE_VERSION
-            );
+    pub fn migrate(mut self) -> Result<Self> {
+        while self.schema_version < CURRENT_EPISODE_VERSION {
+            self = match self.schema_version {
+                1 => migrate_v1_to_v2(self)?,
+                v => bail!(
+                    "no migration from episode schema v{v} to v{}",
+                    CURRENT_EPISODE_VERSION
+                ),
+            };
         }
         if self.schema_version > CURRENT_EPISODE_VERSION {
             bail!(
@@ -71,6 +72,20 @@ impl Episode {
         }
         Ok(self)
     }
+
+    /// Manually transition the verification state. The dream cycle and CLI
+    /// helpers both go through this so the bookkeeping (timestamp on
+    /// `timestamp_end`) stays consistent.
+    pub fn set_verification(&mut self, new: VerificationState) {
+        self.outcome.verification = new;
+    }
+}
+
+/// v1 → v2: added `Outcome.verification`. serde's `default = "default_verification"`
+/// already populated the field on load, so the migration is just a version bump.
+fn migrate_v1_to_v2(mut ep: Episode) -> Result<Episode> {
+    ep.schema_version = 2;
+    Ok(ep)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,9 +153,19 @@ pub struct Outcome {
     pub tests_after: Option<TestResults>,
     pub commit_sha: Option<String>,
     pub pr_number: Option<u32>,
+    /// How well verified is the outcome claim? Drives a multiplicative
+    /// adjustment to learned utility in retrieval ranking — Untested
+    /// captures should not weigh as much as ones that survived 30 days
+    /// post-merge. Added in episode schema v2 (v0.6.1).
+    #[serde(default = "default_verification")]
+    pub verification: VerificationState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+fn default_verification() -> VerificationState {
+    VerificationState::Untested
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutcomeStatus {
     Success,
@@ -155,6 +180,76 @@ impl std::fmt::Display for OutcomeStatus {
             OutcomeStatus::Partial => write!(f, "⚠️ partial"),
             OutcomeStatus::Failure => write!(f, "❌ failure"),
         }
+    }
+}
+
+/// How thoroughly was the outcome verified beyond the raw success/failure
+/// declaration at capture time? Each step earns more weight in retrieval
+/// ranking — see `VerificationState::weight()`.
+///
+/// Transitions are produced by:
+///   - the capture path (Untested),
+///   - test-runner hooks (TestsPass),
+///   - git post-merge hooks (Merged),
+///   - daemon time-based promotion (StableNoRevert),
+///   - the future dream cycle (ValidatedCrossProject).
+///
+/// In v0.6.1 only the data model + ranking integration ship; transitions
+/// happen via `tempera advance-verification` (manual) or
+/// `Episode::set_verification()`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum VerificationState {
+    /// Capture happened. No external signal that the claim holds.
+    Untested,
+    /// A test run was associated with this episode and passed.
+    TestsPass { run_id: String, at: DateTime<Utc> },
+    /// A git merge commit references this episode (commit message tag,
+    /// PR body, or manual `--commit`).
+    Merged { commit: String, at: DateTime<Utc> },
+    /// `Merged` with no revert observed for `days` after `since`.
+    StableNoRevert { days: u32, since: DateTime<Utc> },
+    /// Multiple distinct projects cite this episode as a success-template.
+    /// Surfaced by future dream-cycle synthesis.
+    ValidatedCrossProject { evidence_episodes: Vec<String> },
+}
+
+impl VerificationState {
+    /// Multiplier applied to learned `utility` during retrieval ranking.
+    /// Lower for unverified outcomes, approaches 1.0 as evidence accrues.
+    pub fn weight(&self) -> f32 {
+        match self {
+            Self::Untested => 0.30,
+            Self::TestsPass { .. } => 0.60,
+            Self::Merged { .. } => 0.80,
+            Self::StableNoRevert { days, .. } if *days >= 30 => 0.95,
+            Self::StableNoRevert { .. } => 0.85,
+            Self::ValidatedCrossProject { .. } => 1.00,
+        }
+    }
+
+    /// Short label for human display (also accepted by
+    /// `tempera advance-verification --to <label>`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Untested => "untested",
+            Self::TestsPass { .. } => "tests_pass",
+            Self::Merged { .. } => "merged",
+            Self::StableNoRevert { .. } => "stable_no_revert",
+            Self::ValidatedCrossProject { .. } => "validated_cross_project",
+        }
+    }
+}
+
+impl Default for VerificationState {
+    fn default() -> Self {
+        Self::Untested
+    }
+}
+
+impl std::fmt::Display for VerificationState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
     }
 }
 
@@ -250,6 +345,7 @@ impl Episode {
                 tests_after: None,
                 commit_sha: None,
                 pr_number: None,
+                verification: VerificationState::Untested,
             },
             utility: Utility::default(),
             retrieval_history: vec![],
@@ -508,6 +604,12 @@ mod tests {
         assert!(ep.retrieval_history.is_empty());
         // Older files lack `schema_version`; serde default puts them at v1.
         assert_eq!(ep.schema_version, 1);
+        // serde default also populates verification → Untested.
+        assert_eq!(ep.outcome.verification, VerificationState::Untested);
+        // migrate() walks v1 → v2 without losing fields.
+        let migrated = ep.migrate().unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.outcome.verification, VerificationState::Untested);
     }
 
     #[test]
@@ -546,6 +648,77 @@ mod tests {
         );
         let parsed: Episode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.schema_version, 1);
+    }
+
+    #[test]
+    fn verification_weights_match_roadmap() {
+        // Calibration: spread between 0.30 and 1.00 matches the v0.6.1
+        // table. If any weight changes, downstream eval results will move.
+        assert!((VerificationState::Untested.weight() - 0.30).abs() < 1e-6);
+        let tp = VerificationState::TestsPass {
+            run_id: "x".into(),
+            at: Utc::now(),
+        };
+        assert!((tp.weight() - 0.60).abs() < 1e-6);
+        let m = VerificationState::Merged {
+            commit: "abc".into(),
+            at: Utc::now(),
+        };
+        assert!((m.weight() - 0.80).abs() < 1e-6);
+        let snr_fresh = VerificationState::StableNoRevert {
+            days: 7,
+            since: Utc::now(),
+        };
+        assert!((snr_fresh.weight() - 0.85).abs() < 1e-6);
+        let snr_mature = VerificationState::StableNoRevert {
+            days: 30,
+            since: Utc::now(),
+        };
+        assert!((snr_mature.weight() - 0.95).abs() < 1e-6);
+        let vcp = VerificationState::ValidatedCrossProject {
+            evidence_episodes: vec!["a".into()],
+        };
+        assert!((vcp.weight() - 1.00).abs() < 1e-6);
+    }
+
+    #[test]
+    fn verification_state_serde_tag() {
+        let tp = VerificationState::TestsPass {
+            run_id: "r1".into(),
+            at: Utc::now(),
+        };
+        let json = serde_json::to_string(&tp).unwrap();
+        // Tag-based serialization → `"state": "tests_pass"`
+        assert!(
+            json.contains("\"state\":\"tests_pass\""),
+            "expected tests_pass tag, got: {json}"
+        );
+        let parsed: VerificationState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.label(), "tests_pass");
+    }
+
+    #[test]
+    fn new_episode_starts_untested() {
+        let ep = Episode::new("p".to_string(), "test".to_string());
+        assert_eq!(ep.outcome.verification, VerificationState::Untested);
+    }
+
+    #[test]
+    fn set_verification_updates_outcome() {
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.set_verification(VerificationState::Merged {
+            commit: "deadbeef".to_string(),
+            at: Utc::now(),
+        });
+        assert_eq!(ep.outcome.verification.label(), "merged");
+    }
+
+    #[test]
+    fn migrate_v1_episode_advances_to_v2() {
+        let mut ep = Episode::new("p".to_string(), "test".to_string());
+        ep.schema_version = 1;
+        let migrated = ep.migrate().unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
     }
 
     #[test]
