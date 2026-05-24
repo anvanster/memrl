@@ -85,6 +85,54 @@ impl AnthropicClient {
         Ok(client)
     }
 
+    /// Low-level completion call: send a single user message under the
+    /// given system prompt and return the assistant's text. Used by
+    /// dream-cycle phases that handle their own JSON parsing.
+    pub async fn raw_completion_haiku(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let request = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: user.to_string(),
+            }],
+            system: Some(system.to_string()),
+        };
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send raw completion request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Anthropic API error ({}): {}", status, text);
+        }
+
+        let api_response: AnthropicResponse = response
+            .json()
+            .await
+            .context("Failed to parse raw completion response")?;
+        Ok(api_response
+            .content
+            .into_iter()
+            .next()
+            .map(|c| c.text)
+            .unwrap_or_default())
+    }
+
     /// Extract structured intent from a prompt
     pub async fn extract_intent(&self, prompt: &str) -> Result<ExtractedIntent> {
         let system = r#"You are an expert at analyzing coding task descriptions.

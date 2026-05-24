@@ -30,6 +30,7 @@ mod llm;
 mod retrieve;
 mod stats;
 mod store;
+mod triage;
 mod utility;
 
 #[derive(Parser)]
@@ -184,6 +185,23 @@ enum Commands {
     /// Read-only health check (index, coverage, links, eval, queue)
     Doctor {
         /// Emit machine-readable JSON instead of the colored summary
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Triage a single day's captures (Haiku) to decide whether they're
+    /// worth synthesizing. Caches results per (date, content-hash) so
+    /// re-runs on unchanged days are free.
+    Triage {
+        /// Day to triage in YYYY-MM-DD form. Defaults to today.
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Skip the cache and re-call Haiku.
+        #[arg(long)]
+        force: bool,
+
+        /// Emit the verdict as JSON instead of the colored summary.
         #[arg(long)]
         json: bool,
     },
@@ -420,6 +438,67 @@ async fn main() -> Result<()> {
         Commands::Daemon => {
             let queue = jobs::JobQueue::open_default().await?;
             jobs::run_daemon(&queue, &config).await?;
+        }
+
+        Commands::Triage { date, force, json } => {
+            let target_date = match date.as_deref() {
+                Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                    .map_err(|e| anyhow::anyhow!("invalid --date '{s}': {e}"))?,
+                None => chrono::Utc::now().date_naive(),
+            };
+            let store = store::EpisodeStore::new()?;
+            let all = store.list_all()?;
+            let for_day: Vec<_> = all
+                .into_iter()
+                .filter(|e| e.timestamp_start.date_naive() == target_date)
+                .collect();
+            let triage_store = triage::TriageStore::open_default().await?;
+            let budget = dream::CostBudget::new(config.dream.default_max_usd);
+            let (verdict, from_cache) =
+                triage::triage_day(&target_date, &for_day, &triage_store, Some(&budget), force)
+                    .await?;
+            if json {
+                let body = serde_json::json!({
+                    "date": target_date,
+                    "episode_count": for_day.len(),
+                    "from_cache": from_cache,
+                    "verdict": verdict,
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                use colored::Colorize;
+                let header = format!(
+                    "{} ({} episode(s), {})",
+                    target_date,
+                    for_day.len(),
+                    if from_cache { "cached" } else { "fresh" }
+                );
+                println!();
+                println!("{}", "Triage verdict".bold());
+                println!("  {header}");
+                let score_str = format!("{:.2}", verdict.score);
+                let score_colored = if verdict.score >= 0.7 {
+                    score_str.green()
+                } else if verdict.score >= 0.5 {
+                    score_str.yellow()
+                } else {
+                    score_str.red()
+                };
+                println!(
+                    "  score:    {} ({})",
+                    score_colored,
+                    if verdict.worth_synthesizing() {
+                        "worth synthesizing".green()
+                    } else {
+                        "skip".dimmed()
+                    }
+                );
+                if !verdict.signals.is_empty() {
+                    println!("  signals:  {}", verdict.signals.join(", "));
+                }
+                println!("  reason:   {}", verdict.reasoning);
+                println!();
+            }
         }
 
         Commands::Dream {
