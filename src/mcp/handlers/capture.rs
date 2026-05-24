@@ -70,6 +70,10 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     // road not taken.
     let alternatives = parse_alternatives(args);
 
+    // v0.6.4: parse optional validity_scope from the MCP args. Drives the
+    // per-episode decay rate (see episode::decay_rate_per_day).
+    let validity_scope = parse_validity_scope(args);
+
     let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
     let cfg = config::Config::load().unwrap_or_default();
 
@@ -84,6 +88,7 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         &files_modified,
         &errors,
         &alternatives,
+        validity_scope.clone(),
         cfg.storage.consolidation_threshold,
     )
     .await
@@ -100,6 +105,21 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     ep.intent.extracted_intent = summary.to_string();
     ep.context.errors_encountered = errors;
     ep.alternatives_considered = alternatives;
+    // v0.6.4: if the agent supplied a validity_scope, attach it via a
+    // minimal Claim. If the LLM extract path also populates Claim
+    // (falsifiability + category), we preserve the scope by patching it in.
+    if let Some(scope) = validity_scope {
+        match &mut ep.intent.claim {
+            Some(c) => c.validity_scope = Some(scope),
+            None => {
+                ep.intent.claim = Some(episode::Claim {
+                    falsifiability: 0.0,
+                    category: episode::ClaimCategory::Other,
+                    validity_scope: Some(scope),
+                });
+            }
+        }
+    }
     ep.timestamp_end = chrono::Utc::now();
 
     // Session chaining: use provided session_id or auto-detect from recent episodes
@@ -157,6 +177,7 @@ async fn try_consolidate(
     files_modified: &[String],
     errors: &[episode::ErrorRecord],
     alternatives: &[episode::Alternative],
+    validity_scope: Option<episode::ValidityScope>,
     consolidation_threshold: f32,
 ) -> Option<String> {
     // Try vector search first
@@ -174,6 +195,7 @@ async fn try_consolidate(
             files_modified,
             errors,
             alternatives,
+            validity_scope,
         );
     }
 
@@ -188,7 +210,7 @@ async fn try_consolidate(
     let mut existing = store.load(&best.id).ok()?;
 
     let similarity_pct = (best.similarity_score * 100.0) as u32;
-    let short_id = &existing.id[..8];
+    let short_id = existing.id[..8].to_string();
 
     // Merge: newer summary wins (latest knowledge = best known method)
     existing.intent.extracted_intent = summary.to_string();
@@ -228,6 +250,10 @@ async fn try_consolidate(
             existing.alternatives_considered.push(alt.clone());
         }
     }
+
+    // v0.6.4: latest validity_scope wins. The new capture is making the
+    // most informed claim about where the knowledge applies.
+    apply_validity_scope(&mut existing, validity_scope);
 
     // Update timestamp to mark when BKM was last refined
     existing.timestamp_end = chrono::Utc::now();
@@ -270,6 +296,7 @@ fn try_tag_consolidate(
     files_modified: &[String],
     errors: &[episode::ErrorRecord],
     alternatives: &[episode::Alternative],
+    validity_scope: Option<episode::ValidityScope>,
 ) -> Option<String> {
     if tags.len() < 2 {
         return None; // Not enough tags to match on
@@ -324,6 +351,7 @@ fn try_tag_consolidate(
             existing.alternatives_considered.push(alt.clone());
         }
     }
+    apply_validity_scope(&mut existing, validity_scope);
     existing.timestamp_end = chrono::Utc::now();
 
     store.update(&existing).ok()?;
@@ -422,6 +450,81 @@ fn parse_how_close(s: &str) -> episode::HowClose {
     }
 }
 
+/// Parse the optional `validity_scope` object from MCP arguments. Returns
+/// `None` if the object is absent, the `kind` is unknown, or required
+/// per-kind fields are missing — never bails the whole capture.
+pub(crate) fn parse_validity_scope(args: &Value) -> Option<episode::ValidityScope> {
+    let obj = args.get("validity_scope").and_then(|v| v.as_object())?;
+    let kind = obj.get("kind").and_then(|v| v.as_str())?;
+    match kind.to_lowercase().as_str() {
+        "forever" => Some(episode::ValidityScope::Forever),
+        "language" => {
+            obj.get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| episode::ValidityScope::Language {
+                    name: name.to_string(),
+                })
+        }
+        "crate" => {
+            let name = obj.get("name").and_then(|v| v.as_str())?;
+            let version = obj
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(episode::ValidityScope::Crate {
+                name: name.to_string(),
+                version,
+            })
+        }
+        "domain" => {
+            obj.get("tag")
+                .and_then(|v| v.as_str())
+                .map(|tag| episode::ValidityScope::Domain {
+                    tag: tag.to_string(),
+                })
+        }
+        "workaround" => {
+            let ref_ = obj.get("ref_").and_then(|v| v.as_str())?;
+            let expires = obj
+                .get("expires")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&chrono::Utc));
+            Some(episode::ValidityScope::Workaround {
+                ref_: ref_.to_string(),
+                expires,
+            })
+        }
+        "project" => {
+            obj.get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| episode::ValidityScope::Project {
+                    name: name.to_string(),
+                })
+        }
+        _ => None,
+    }
+}
+
+/// Apply a new `validity_scope` to an episode being consolidated. The new
+/// scope wins (latest knowledge); creates a minimal Claim if none existed.
+fn apply_validity_scope(ep: &mut episode::Episode, scope: Option<episode::ValidityScope>) {
+    let Some(scope) = scope else {
+        return;
+    };
+    match &mut ep.intent.claim {
+        Some(c) => c.validity_scope = Some(scope),
+        None => {
+            ep.intent.claim = Some(episode::Claim {
+                falsifiability: 0.0,
+                category: episode::ClaimCategory::Other,
+                validity_scope: Some(scope),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,6 +561,70 @@ mod tests {
         assert_eq!(parse_how_close("long_shot"), episode::HowClose::LongShot);
         assert_eq!(parse_how_close("plausible"), episode::HowClose::Plausible);
         assert_eq!(parse_how_close("garbage"), episode::HowClose::Plausible);
+    }
+
+    #[test]
+    fn parse_validity_scope_forever() {
+        let args = json!({"validity_scope": {"kind": "forever"}});
+        let scope = parse_validity_scope(&args).expect("scope parsed");
+        assert!(matches!(scope, episode::ValidityScope::Forever));
+    }
+
+    #[test]
+    fn parse_validity_scope_crate_keeps_version() {
+        let args = json!({
+            "validity_scope": {
+                "kind": "crate",
+                "name": "tokio",
+                "version": "=1.43.0"
+            }
+        });
+        let scope = parse_validity_scope(&args).expect("scope parsed");
+        match scope {
+            episode::ValidityScope::Crate { name, version } => {
+                assert_eq!(name, "tokio");
+                assert_eq!(version, "=1.43.0");
+            }
+            other => panic!("expected Crate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_workaround_with_expires() {
+        let args = json!({
+            "validity_scope": {
+                "kind": "workaround",
+                "ref_": "tokio-rs/tokio#1234",
+                "expires": "2026-12-31T23:59:59Z"
+            }
+        });
+        let scope = parse_validity_scope(&args).expect("scope parsed");
+        match scope {
+            episode::ValidityScope::Workaround { ref_, expires } => {
+                assert_eq!(ref_, "tokio-rs/tokio#1234");
+                assert!(expires.is_some());
+            }
+            other => panic!("expected Workaround, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_missing_required_field_returns_none() {
+        // "crate" needs name → omit it → None
+        let args = json!({"validity_scope": {"kind": "crate"}});
+        assert!(parse_validity_scope(&args).is_none());
+    }
+
+    #[test]
+    fn parse_validity_scope_unknown_kind_returns_none() {
+        let args = json!({"validity_scope": {"kind": "moonshot"}});
+        assert!(parse_validity_scope(&args).is_none());
+    }
+
+    #[test]
+    fn parse_validity_scope_absent_returns_none() {
+        let args = json!({"summary": "x"});
+        assert!(parse_validity_scope(&args).is_none());
     }
 
     #[test]

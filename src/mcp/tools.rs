@@ -105,6 +105,22 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                             },
                             "required": ["approach", "why_not"]
                         }
+                    },
+                    "validity_scope": {
+                        "type": "object",
+                        "description": "Where does this claim hold? Drives time-decay: 'forever' for language semantics, 'crate' for version-pinned facts, 'workaround' for issue-bound notes. Omit if you're not sure — falls back to 1%/day project-level decay. Choose the narrowest scope that still applies.",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["forever", "language", "crate", "domain", "workaround", "project"]
+                            },
+                            "name": { "type": "string", "description": "For language/crate/project: identifier" },
+                            "version": { "type": "string", "description": "For crate: version constraint (=1.43.0, >=1.0,<2.0, ^1.0). Empty = any." },
+                            "tag": { "type": "string", "description": "For domain: tag (e.g. 'async-rust')" },
+                            "ref_": { "type": "string", "description": "For workaround: issue/PR reference (e.g. 'tokio-rs/tokio#1234')" },
+                            "expires": { "type": "string", "description": "For workaround: optional ISO8601 timestamp when this claim is presumed dead" }
+                        },
+                        "required": ["kind"]
                     }
                 },
                 "required": ["summary", "task_type", "outcome"]

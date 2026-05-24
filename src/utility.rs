@@ -169,8 +169,23 @@ fn apply_utility_decay(
 
         let days_inactive = (now - last_activity).num_days().max(0) as f64;
 
+        // v0.6.4: scope-aware decay rate. Forever-scoped truths don't
+        // decay; workaround-scoped notes decay 5×. Episodes with no
+        // validity_scope (pre-v0.6.4 captures, or modern captures the
+        // agent didn't scope) fall back to params.decay_rate so behavior
+        // matches the legacy uniform-decay default.
+        let scope = episode
+            .intent
+            .claim
+            .as_ref()
+            .and_then(|c| c.validity_scope.as_ref());
+        let decay_rate = match scope {
+            Some(s) => crate::episode::decay_rate_per_day(Some(s)),
+            None => params.decay_rate,
+        };
+
         // Apply exponential decay: utility *= (1 - decay_rate)^days
-        let decay_factor = (1.0 - params.decay_rate).powf(days_inactive);
+        let decay_factor = (1.0 - decay_rate).powf(days_inactive);
 
         // Only apply decay if significant
         if decay_factor < 0.99 {
@@ -728,6 +743,7 @@ mod tests {
         ep.intent.claim = Some(crate::episode::Claim {
             falsifiability: 0.5,
             category: crate::episode::ClaimCategory::Logistics,
+            validity_scope: None,
         });
         let params = UtilityParams::default(); // threshold 0.7
         assert!(!episode_can_propagate(&ep, &params));
@@ -739,6 +755,7 @@ mod tests {
         ep.intent.claim = Some(crate::episode::Claim {
             falsifiability: 0.9,
             category: crate::episode::ClaimCategory::ApiContract,
+            validity_scope: None,
         });
         let params = UtilityParams::default();
         assert!(episode_can_propagate(&ep, &params));

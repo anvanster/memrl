@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 ///   v2 — added `Outcome.verification` (v0.6.1).
 ///   v3 — added `Intent.claim` (falsifiability + category) (v0.6.2).
 ///   v4 — added `Episode.alternatives_considered` (v0.6.3).
-pub const CURRENT_EPISODE_VERSION: u32 = 4;
+///   v5 — added `Claim.validity_scope` + scope-aware decay (v0.6.4).
+pub const CURRENT_EPISODE_VERSION: u32 = 5;
 
 fn default_schema_version() -> u32 {
     // Old episodes on disk pre-date the schema_version field. They are
@@ -67,6 +68,7 @@ impl Episode {
                 1 => migrate_v1_to_v2(self)?,
                 2 => migrate_v2_to_v3(self)?,
                 3 => migrate_v3_to_v4(self)?,
+                4 => migrate_v4_to_v5(self)?,
                 v => bail!(
                     "no migration from episode schema v{v} to v{}",
                     CURRENT_EPISODE_VERSION
@@ -115,6 +117,15 @@ fn migrate_v3_to_v4(mut ep: Episode) -> Result<Episode> {
     Ok(ep)
 }
 
+/// v4 → v5: added `Claim.validity_scope`. Field is `Option<ValidityScope>`;
+/// serde default = None means "behaves like a Project-scoped capture
+/// (1%/day decay)". Migration is a version bump — when the field is None,
+/// the new scope-aware `decay_rate_per_day` falls back to the legacy rate.
+fn migrate_v4_to_v5(mut ep: Episode) -> Result<Episode> {
+    ep.schema_version = 5;
+    Ok(ep)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Intent {
     /// The raw first prompt from the user
@@ -143,7 +154,84 @@ pub struct Claim {
     /// See the prompt in `llm.rs` for the calibration scale.
     pub falsifiability: f32,
     pub category: ClaimCategory,
-    // validity_scope: Option<ValidityScope>,  // ships in v0.6.4
+    /// What world is this claim valid in? Drives time-decay rate
+    /// (`decay_rate_per_day`) and future invalidation triggers (Cargo.lock
+    /// changes, workaround expiry). `None` = legacy behavior (1%/day decay,
+    /// no invalidation triggers). Added in episode schema v5 (v0.6.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validity_scope: Option<ValidityScope>,
+}
+
+/// Where in the world a claim holds. Different scopes decay at different
+/// rates: language-level truths are durable, version-pinned workarounds
+/// expire quickly. The rates come straight from `decay_rate_per_day`.
+///
+/// Future versions wire scope-specific invalidation: `Crate` retires on
+/// version mismatch in Cargo.lock, `Workaround` retires when the
+/// referenced issue closes / `expires` passes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ValidityScope {
+    /// Language semantics, math, "thiserror exists" — never decays.
+    Forever,
+    /// True about a language as a whole, e.g. "Rust doesn't have GC".
+    Language { name: String },
+    /// True for a specific crate at a specific version. Invalidates on
+    /// version change in the active project's Cargo.lock (v0.6.4.1+).
+    /// `version` is a free-form constraint string — `=1.43.0`, `>=1.0,<2.0`,
+    /// `^1.0`, or empty for "any".
+    Crate { name: String, version: String },
+    /// True within a problem domain (e.g. "async-rust", "embedded-systems").
+    Domain { tag: String },
+    /// Tied to a specific issue / bug ID. Expires automatically when
+    /// `expires` passes; future versions also retire when the referenced
+    /// issue closes.
+    Workaround {
+        ref_: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires: Option<DateTime<Utc>>,
+    },
+    /// Tied to a single project's current state. Default decay (1%/day).
+    Project { name: String },
+}
+
+impl ValidityScope {
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Forever => "forever",
+            Self::Language { .. } => "language",
+            Self::Crate { .. } => "crate",
+            Self::Domain { .. } => "domain",
+            Self::Workaround { .. } => "workaround",
+            Self::Project { .. } => "project",
+        }
+    }
+}
+
+/// Per-day utility decay rate for an episode's scope. Calibration is from
+/// the v0.6 roadmap:
+///
+/// | Scope       | Rate    | Half-life (rough) |
+/// |-------------|---------|-------------------|
+/// | Forever     | 0.000   | ∞                 |
+/// | Language    | 0.001   | ~3 years          |
+/// | Domain      | 0.005   | ~140 days         |
+/// | Project     | 0.010   | ~70 days          |
+/// | Crate       | 0.020   | ~35 days          |
+/// | Workaround  | 0.050   | ~14 days          |
+///
+/// `None` (no scope on the capture) falls back to the legacy 0.010 rate so
+/// pre-v0.6.4 episodes behave exactly as before.
+pub fn decay_rate_per_day(scope: Option<&ValidityScope>) -> f64 {
+    match scope {
+        None => 0.010,
+        Some(ValidityScope::Forever) => 0.000,
+        Some(ValidityScope::Language { .. }) => 0.001,
+        Some(ValidityScope::Domain { .. }) => 0.005,
+        Some(ValidityScope::Project { .. }) => 0.010,
+        Some(ValidityScope::Crate { .. }) => 0.020,
+        Some(ValidityScope::Workaround { .. }) => 0.050,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -896,6 +984,7 @@ mod tests {
         ep.intent.claim = Some(Claim {
             falsifiability: 0.85,
             category: ClaimCategory::ApiContract,
+            validity_scope: None,
         });
         let json = serde_json::to_string(&ep).unwrap();
         // skip_serializing_if drops None claims; this one should serialize.
@@ -918,6 +1007,134 @@ mod tests {
             !json.contains("\"claim\""),
             "claim should be absent: {json}"
         );
+    }
+
+    #[test]
+    fn decay_rate_calibration_matches_roadmap_table() {
+        // These numbers are documented externally; a change here will move
+        // every user's utility curve. Lock them down.
+        assert_eq!(decay_rate_per_day(None), 0.010);
+        assert_eq!(decay_rate_per_day(Some(&ValidityScope::Forever)), 0.000);
+        assert_eq!(
+            decay_rate_per_day(Some(&ValidityScope::Language {
+                name: "rust".into()
+            })),
+            0.001
+        );
+        assert_eq!(
+            decay_rate_per_day(Some(&ValidityScope::Domain {
+                tag: "async".into()
+            })),
+            0.005
+        );
+        assert_eq!(
+            decay_rate_per_day(Some(&ValidityScope::Project {
+                name: "tempera".into()
+            })),
+            0.010
+        );
+        assert_eq!(
+            decay_rate_per_day(Some(&ValidityScope::Crate {
+                name: "tokio".into(),
+                version: "=1.43.0".into(),
+            })),
+            0.020
+        );
+        assert_eq!(
+            decay_rate_per_day(Some(&ValidityScope::Workaround {
+                ref_: "issue/1234".into(),
+                expires: None,
+            })),
+            0.050
+        );
+    }
+
+    #[test]
+    fn forever_scope_yields_no_decay_after_a_year() {
+        // (1 - 0.000)^365 == 1.0 — Forever truths keep their utility.
+        let r = decay_rate_per_day(Some(&ValidityScope::Forever));
+        let factor = (1.0 - r).powf(365.0);
+        assert!((factor - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn workaround_decays_five_times_faster_than_project() {
+        // 100 days for both scopes:
+        //   project:    (1 - 0.010)^100 ≈ 0.366
+        //   workaround: (1 - 0.050)^100 ≈ 0.0059
+        let p = (1.0 - decay_rate_per_day(Some(&ValidityScope::Project { name: "t".into() })))
+            .powf(100.0);
+        let w = (1.0
+            - decay_rate_per_day(Some(&ValidityScope::Workaround {
+                ref_: "x".into(),
+                expires: None,
+            })))
+        .powf(100.0);
+        assert!(p > 0.3, "project @ 100d should retain >0.3 (got {p})");
+        assert!(
+            w < 0.01,
+            "workaround @ 100d should fall below 0.01 (got {w})"
+        );
+    }
+
+    #[test]
+    fn validity_scope_serde_tagged_per_variant() {
+        for s in &[
+            ValidityScope::Forever,
+            ValidityScope::Language {
+                name: "rust".into(),
+            },
+            ValidityScope::Crate {
+                name: "tokio".into(),
+                version: "=1.43.0".into(),
+            },
+            ValidityScope::Domain {
+                tag: "async-rust".into(),
+            },
+            ValidityScope::Workaround {
+                ref_: "rust-lang/rust#1234".into(),
+                expires: None,
+            },
+            ValidityScope::Project {
+                name: "tempera".into(),
+            },
+        ] {
+            let json = serde_json::to_string(s).unwrap();
+            assert!(
+                json.contains(&format!("\"kind\":\"{}\"", s.kind_label())),
+                "kind tag missing for {:?}: {json}",
+                s
+            );
+            let parsed: ValidityScope = serde_json::from_str(&json).unwrap();
+            assert_eq!(&parsed, s);
+        }
+    }
+
+    #[test]
+    fn validity_scope_absent_when_none() {
+        let ep = Episode::new("p".into(), "test".into());
+        // Add a claim without scope.
+        let mut ep_with_claim = ep.clone();
+        ep_with_claim.intent.claim = Some(Claim {
+            falsifiability: 0.8,
+            category: ClaimCategory::Performance,
+            validity_scope: None,
+        });
+        let json = serde_json::to_string(&ep_with_claim).unwrap();
+        assert!(
+            !json.contains("\"validity_scope\""),
+            "None scope should not serialize: {json}"
+        );
+    }
+
+    #[test]
+    fn migrate_v4_episode_advances_to_current() {
+        let mut ep = Episode::new("p".into(), "test".into());
+        ep.schema_version = 4;
+        let migrated = ep.migrate().unwrap();
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
+        // claim is still None (no LLM ran in test)
+        assert!(migrated.intent.claim.is_none());
     }
 
     #[test]
@@ -947,7 +1164,10 @@ mod tests {
         assert_eq!(parsed.alternatives_considered.len(), 1);
         let alt = &parsed.alternatives_considered[0];
         assert_eq!(alt.how_close, HowClose::NearMiss);
-        assert_eq!(alt.would_revisit_if.as_deref(), Some("single-writer becomes the case"));
+        assert_eq!(
+            alt.would_revisit_if.as_deref(),
+            Some("single-writer becomes the case")
+        );
     }
 
     #[test]
@@ -960,15 +1180,16 @@ mod tests {
     }
 
     #[test]
-    fn migrate_v3_episode_advances_to_v4_keeps_claim() {
+    fn migrate_v3_episode_advances_to_current_keeps_claim() {
         let mut ep = Episode::new("p".into(), "test".into());
         ep.schema_version = 3;
         ep.intent.claim = Some(Claim {
             falsifiability: 0.75,
             category: ClaimCategory::Performance,
+            validity_scope: None,
         });
         let migrated = ep.migrate().unwrap();
-        assert_eq!(migrated.schema_version, 4);
+        assert_eq!(migrated.schema_version, CURRENT_EPISODE_VERSION);
         let claim = migrated.intent.claim.expect("claim retained");
         assert!((claim.falsifiability - 0.75).abs() < 1e-6);
         assert_eq!(claim.category, ClaimCategory::Performance);

@@ -371,6 +371,10 @@ fn parse_claim(parsed: &serde_json::Value) -> Option<Claim> {
     Some(Claim {
         falsifiability: (falsifiability as f32).clamp(0.0, 1.0),
         category,
+        // The LLM doesn't infer scope at capture time — the agent supplies
+        // it via the MCP `validity_scope` parameter when it has a good
+        // reason to pin one. Default None means "legacy 1%/day decay".
+        validity_scope: None,
     })
 }
 
