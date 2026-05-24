@@ -432,6 +432,268 @@ fn hint_for(name: &str) -> &'static str {
     }
 }
 
+// ===== Remediation (v0.7.6) =====
+
+/// A single remediation action that can lift the health score.
+///
+/// v0.7.6 ships exactly one variant — `Reindex` — because one
+/// `tempera index --reindex` covers the three index-related
+/// dimensions (freshness, embedding coverage, keyword coverage) in
+/// one shot. Future variants land here as new dimensions and fix
+/// paths are added; the planner just maps low dimensions → steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemediationStep {
+    /// Full rebuild of the vector + keyword indexes. Cheap (free, ~30s)
+    /// and idempotent.
+    Reindex,
+}
+
+impl RemediationStep {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Reindex => "reindex",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Reindex => "rebuild vector + keyword indexes from scratch",
+        }
+    }
+
+    pub fn estimated_usd(self) -> f32 {
+        match self {
+            Self::Reindex => 0.0,
+        }
+    }
+
+    pub fn estimated_seconds(self) -> u32 {
+        match self {
+            Self::Reindex => 30,
+        }
+    }
+
+    /// Run the step. Always synchronous from the caller's perspective —
+    /// no daemon dependency. Returns a one-line summary.
+    pub async fn execute(self) -> Result<String> {
+        match self {
+            Self::Reindex => {
+                let mut idx = crate::indexer::EpisodeIndexer::new().await?;
+                let n = idx.index_all(true).await?;
+                Ok(format!("reindexed {n} episodes"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemediationPlan {
+    pub steps: Vec<RemediationStep>,
+    pub estimated_usd: f32,
+    pub estimated_seconds: u32,
+}
+
+/// Map low dimensions to the steps that would lift them. Deduplicates:
+/// when multiple dimensions share a fix (e.g. `Reindex` covers index
+/// freshness AND embedding coverage AND keyword coverage), the step
+/// only appears once.
+///
+/// Steps are ordered so prerequisites land first — currently trivial
+/// (single step), but the structure is here for v0.7.6+ additions.
+pub fn plan_remediation(report: &HealthReport, max_usd: f32) -> RemediationPlan {
+    use std::collections::BTreeSet;
+    let mut chosen: BTreeSet<RemediationStep> = BTreeSet::new();
+    let mut spent: f32 = 0.0;
+
+    let by_name: std::collections::HashMap<&str, &DimensionReport> =
+        report.dimensions.iter().map(|d| (d.name, d)).collect();
+
+    let dim_below = |name: &str, threshold: f32| -> bool {
+        by_name.get(name).is_some_and(|d| d.score < threshold)
+    };
+
+    // Reindex covers index freshness, embedding coverage, and keyword
+    // coverage. If any of the three is below 0.9 (anything but Pass),
+    // run it.
+    if dim_below("index freshness", 0.9)
+        || dim_below("embedding coverage", 0.9)
+        || dim_below("keyword coverage", 0.9)
+    {
+        let step = RemediationStep::Reindex;
+        if spent + step.estimated_usd() <= max_usd {
+            chosen.insert(step);
+            spent += step.estimated_usd();
+        }
+    }
+
+    let steps: Vec<RemediationStep> = chosen.into_iter().collect();
+    let estimated_seconds = steps.iter().map(|s| s.estimated_seconds()).sum();
+    RemediationPlan {
+        steps,
+        estimated_usd: spent,
+        estimated_seconds,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedStep {
+    pub step: RemediationStep,
+    pub summary: String,
+    pub elapsed_seconds: f64,
+    pub cost_usd: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemediationOutcome {
+    pub initial_score: u32,
+    pub final_score: u32,
+    pub target_score: u32,
+    pub target_reached: bool,
+    pub spent_usd: f32,
+    pub applied: Vec<AppliedStep>,
+    pub skipped: Vec<RemediationSkip>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RemediationSkip {
+    pub step: RemediationStep,
+    pub reason: String,
+}
+
+/// Walk the plan: for each step, check budget + target, run, re-check
+/// health, decide whether to continue. Stops on:
+///   - score >= target_score
+///   - next step would exceed max_usd
+///   - a step errors (logged, recorded, plan continues to next step)
+pub async fn execute_remediation(
+    plan: RemediationPlan,
+    target_score: u32,
+    max_usd: f32,
+) -> Result<RemediationOutcome> {
+    let initial = check().await?;
+    let initial_score = initial.score;
+    let mut current_score = initial_score;
+    let mut spent = 0.0;
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+
+    for step in plan.steps {
+        if current_score >= target_score {
+            skipped.push(RemediationSkip {
+                step,
+                reason: format!("target {target_score} already reached"),
+            });
+            continue;
+        }
+        if spent + step.estimated_usd() > max_usd {
+            skipped.push(RemediationSkip {
+                step,
+                reason: format!(
+                    "would spend ${:.4} (cap ${:.4})",
+                    spent + step.estimated_usd(),
+                    max_usd
+                ),
+            });
+            continue;
+        }
+        let started = std::time::Instant::now();
+        match step.execute().await {
+            Ok(summary) => {
+                let elapsed = started.elapsed().as_secs_f64();
+                spent += step.estimated_usd();
+                applied.push(AppliedStep {
+                    step,
+                    summary,
+                    elapsed_seconds: elapsed,
+                    cost_usd: step.estimated_usd(),
+                });
+                // Re-check score after each step.
+                if let Ok(rep) = check().await {
+                    current_score = rep.score;
+                }
+            }
+            Err(e) => {
+                skipped.push(RemediationSkip {
+                    step,
+                    reason: format!("error: {e:#}"),
+                });
+            }
+        }
+    }
+
+    Ok(RemediationOutcome {
+        initial_score,
+        final_score: current_score,
+        target_score,
+        target_reached: current_score >= target_score,
+        spent_usd: spent,
+        applied,
+        skipped,
+    })
+}
+
+pub fn print_remediation_plan(plan: &RemediationPlan) {
+    println!();
+    println!("{}", "Remediation plan".bold());
+    if plan.steps.is_empty() {
+        println!("  (no steps needed — every dimension at/above its threshold)");
+    } else {
+        for (i, step) in plan.steps.iter().enumerate() {
+            println!(
+                "  {}. {:<10}  ~{}s, ~${:.4}    {}",
+                i + 1,
+                step.kind(),
+                step.estimated_seconds(),
+                step.estimated_usd(),
+                step.description()
+            );
+        }
+        println!(
+            "  total:        ~{}s, ~${:.4}",
+            plan.estimated_seconds, plan.estimated_usd
+        );
+    }
+    println!();
+}
+
+pub fn print_remediation_outcome(outcome: &RemediationOutcome) {
+    println!();
+    println!("{}", "Remediation outcome".bold());
+    let arrow = if outcome.final_score > outcome.initial_score {
+        format!("{} → {}", outcome.initial_score, outcome.final_score).green()
+    } else if outcome.final_score < outcome.initial_score {
+        format!("{} → {}", outcome.initial_score, outcome.final_score).red()
+    } else {
+        format!("{} → {}", outcome.initial_score, outcome.final_score).normal()
+    };
+    let target = if outcome.target_reached {
+        format!("target {} ✓", outcome.target_score).green()
+    } else {
+        format!("target {}", outcome.target_score).yellow()
+    };
+    println!("  score:   {arrow}  ({target})");
+    println!("  spent:   ${:.4}", outcome.spent_usd);
+    if !outcome.applied.is_empty() {
+        println!("  applied:");
+        for a in &outcome.applied {
+            println!(
+                "    ✓ {:<10}  {}  ({:.2}s)",
+                a.step.kind(),
+                a.summary,
+                a.elapsed_seconds
+            );
+        }
+    }
+    if !outcome.skipped.is_empty() {
+        println!("  skipped:");
+        for s in &outcome.skipped {
+            println!("    ~ {:<10}  {}", s.step.kind(), s.reason);
+        }
+    }
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +774,82 @@ mod tests {
         let (score, summary) = check_session_links(&[ep]);
         assert_eq!(score, 0.0);
         assert!(summary.contains("1 broken"));
+    }
+
+    // ===== Remediation plan tests =====
+
+    fn make_dim_synthetic(name: &'static str, score: f32) -> DimensionReport {
+        DimensionReport {
+            name,
+            weight: 25,
+            score,
+            points: (score * 25.0).round() as u32,
+            status: DimensionStatus::from_score(score),
+            summary: String::new(),
+        }
+    }
+
+    fn make_report_synthetic(dims: Vec<DimensionReport>) -> HealthReport {
+        let score: u32 = dims.iter().map(|d| d.points).sum::<u32>().min(100);
+        HealthReport {
+            score,
+            dimensions: dims,
+            version: "0.0.0-test".to_string(),
+            generated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn plan_includes_reindex_when_index_freshness_low() {
+        let r = make_report_synthetic(vec![
+            make_dim_synthetic("index freshness", 0.2),
+            make_dim_synthetic("embedding coverage", 1.0),
+            make_dim_synthetic("keyword coverage", 1.0),
+        ]);
+        let plan = plan_remediation(&r, 1.0);
+        assert_eq!(plan.steps, vec![RemediationStep::Reindex]);
+    }
+
+    #[test]
+    fn plan_dedups_reindex_across_three_dimensions() {
+        // Multiple dimensions failing → still only one Reindex.
+        let r = make_report_synthetic(vec![
+            make_dim_synthetic("index freshness", 0.2),
+            make_dim_synthetic("embedding coverage", 0.3),
+            make_dim_synthetic("keyword coverage", 0.4),
+        ]);
+        let plan = plan_remediation(&r, 1.0);
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0], RemediationStep::Reindex);
+    }
+
+    #[test]
+    fn plan_empty_when_everything_passes() {
+        let r = make_report_synthetic(vec![
+            make_dim_synthetic("index freshness", 0.99),
+            make_dim_synthetic("embedding coverage", 1.0),
+            make_dim_synthetic("keyword coverage", 1.0),
+        ]);
+        let plan = plan_remediation(&r, 1.0);
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.estimated_usd, 0.0);
+    }
+
+    #[test]
+    fn plan_respects_max_usd_budget() {
+        let r = make_report_synthetic(vec![make_dim_synthetic("index freshness", 0.2)]);
+        // Reindex is free, so a $0 cap still includes it; only zero-cost
+        // steps fit. (Future paid steps would be dropped.)
+        let plan = plan_remediation(&r, 0.0);
+        assert_eq!(plan.steps, vec![RemediationStep::Reindex]);
+    }
+
+    #[test]
+    fn remediation_step_metadata_present() {
+        let s = RemediationStep::Reindex;
+        assert_eq!(s.kind(), "reindex");
+        assert!(!s.description().is_empty());
+        assert!(s.estimated_seconds() > 0);
+        assert_eq!(s.estimated_usd(), 0.0);
     }
 }

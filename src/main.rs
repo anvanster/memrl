@@ -185,11 +185,34 @@ enum Commands {
     /// Snapshot or restore the tempera data directory
     Backup(BackupArgs),
 
-    /// Read-only health check (index, coverage, links, eval, queue)
+    /// Health check + optional auto-remediation. By default just
+    /// reports the current score with hints to lift it. v0.7.6 adds
+    /// `--remediate` which walks a dependency-ordered plan to fix
+    /// what's lifting-able (currently: reindex for low coverage).
     Doctor {
         /// Emit machine-readable JSON instead of the colored summary
         #[arg(long)]
         json: bool,
+
+        /// Show the remediation plan but don't run anything.
+        #[arg(long)]
+        remediation_plan: bool,
+
+        /// Actually run the remediation steps. Requires --yes.
+        #[arg(long)]
+        remediate: bool,
+
+        /// Confirms --remediate. Without it the runner refuses to apply.
+        #[arg(long)]
+        yes: bool,
+
+        /// Stop once the score reaches this value. Default 90.
+        #[arg(long, default_value_t = 90)]
+        target_score: u32,
+
+        /// Dollar cap for remediation. Default $0.50.
+        #[arg(long, default_value_t = 0.50)]
+        max_usd: f32,
     },
 
     /// Author a reflection page for a single day. Runs Haiku triage
@@ -857,14 +880,72 @@ async fn main() -> Result<()> {
             );
         }
 
-        Commands::Doctor { json } => {
+        Commands::Doctor {
+            json,
+            remediation_plan,
+            remediate,
+            yes,
+            target_score,
+            max_usd,
+        } => {
             let report = doctor::check().await?;
+
+            // --remediation-plan: preview only, no execution.
+            if remediation_plan {
+                let plan = doctor::plan_remediation(&report, max_usd);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    doctor::print_human(&report);
+                    doctor::print_remediation_plan(&plan);
+                }
+                return Ok(());
+            }
+
+            // --remediate: build plan, gate on --yes, run, re-report.
+            if remediate {
+                if !yes {
+                    eprintln!(
+                        "refusing to run remediation without --yes (this would modify your data dir)"
+                    );
+                    std::process::exit(2);
+                }
+                let plan = doctor::plan_remediation(&report, max_usd);
+                if !json {
+                    doctor::print_human(&report);
+                    doctor::print_remediation_plan(&plan);
+                }
+                if plan.steps.is_empty() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "note": "no remediation needed",
+                                "initial_score": report.score
+                            }))?
+                        );
+                    }
+                    return Ok(());
+                }
+                let outcome = doctor::execute_remediation(plan, target_score, max_usd).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&outcome)?);
+                } else {
+                    doctor::print_remediation_outcome(&outcome);
+                }
+                if !outcome.target_reached {
+                    // Exit non-zero so cron / CI can react.
+                    std::process::exit(3);
+                }
+                return Ok(());
+            }
+
+            // Default: read-only report (same as v0.4.6 behavior).
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 doctor::print_human(&report);
             }
-            // Non-zero exit when health is poor, so CI can gate on it later.
             if report.score < 50 {
                 std::process::exit(1);
             }
