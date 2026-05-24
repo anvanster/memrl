@@ -36,9 +36,11 @@ pub const HANDLER_TIMEOUT_SECONDS: u64 = 55;
 /// Default retry budget per job.
 pub const DEFAULT_MAX_ATTEMPTS: i64 = 3;
 
-/// Inline migration SQL — embedded so the binary doesn't depend on the
-/// migrations/ directory being present at runtime.
-const MIGRATION_001_JOBS: &str = include_str!("../migrations/0001_jobs.up.sql");
+/// Embedded migrator. `sqlx::migrate!()` reads `./migrations/` at compile
+/// time, bundles them into the binary, and tracks applied versions in
+/// `_sqlx_migrations`. Add a new migration by dropping a new file there;
+/// no code change required.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -124,11 +126,10 @@ impl JobQueue {
     }
 
     async fn run_migrations(pool: &SqlitePool) -> Result<()> {
-        // Multi-statement migration via sqlx::raw_sql.
-        sqlx::raw_sql(MIGRATION_001_JOBS)
-            .execute(pool)
+        MIGRATOR
+            .run(pool)
             .await
-            .context("Failed to apply jobs migration")?;
+            .context("Failed to run SQLite migrations")?;
         Ok(())
     }
 
