@@ -31,6 +31,12 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                         "type": "boolean",
                         "description": "If true, list all episodes instead of searching (ignores query)",
                         "default": false
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "cross-project"],
+                        "description": "v0.10: 'project' (default) stays inside the current project. 'cross-project' also pulls in transferable episodes from other projects — claims marked Forever, Language, Crate, Domain, or Workaround by validity scope. Use cross-project when the question is about a language/library/domain (e.g. async-rust deadlocks, sqlx migrations) and the current project has thin coverage. Project-scoped claims from other projects are always filtered out.",
+                        "default": "project"
                     }
                 },
                 "required": []

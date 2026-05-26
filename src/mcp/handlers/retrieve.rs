@@ -12,6 +12,15 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
     let project = args.get("project").and_then(|v| v.as_str());
     let list_all = args.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+    let scope = match args.get("scope").and_then(|v| v.as_str()) {
+        Some(s)
+            if s.eq_ignore_ascii_case("cross-project")
+                || s.eq_ignore_ascii_case("cross_project") =>
+        {
+            retrieve::RetrievalScope::CrossProject
+        }
+        _ => retrieve::RetrievalScope::Project,
+    };
 
     let config = config::Config::load().map_err(|e| e.to_string())?;
     let store = store::EpisodeStore::new().map_err(|e| e.to_string())?;
@@ -32,13 +41,47 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         // If not found by ID, fall through to search
     }
 
-    // Case 3: Semantic search
-    let episodes = match retrieve::try_vector_search(query, limit, project, &config).await {
+    // Case 3: Semantic search (scope-aware — v0.10).
+    let episodes = match retrieve::try_search_scoped(query, limit, project, scope, &config).await {
         Ok(eps) if !eps.is_empty() => eps,
         _ => {
-            // Fallback to text search
-            retrieve::retrieve_episodes_text(query, limit, project, &config, &store)
-                .map_err(|e| e.to_string())?
+            // Fallback to text search. CrossProject scope widens the
+            // pull and filters by transferable-claim status; Project
+            // scope preserves the prior behaviour.
+            let raw = retrieve::retrieve_episodes_text(
+                query,
+                if scope == retrieve::RetrievalScope::CrossProject {
+                    limit.saturating_mul(3).max(limit)
+                } else {
+                    limit
+                },
+                if scope == retrieve::RetrievalScope::CrossProject {
+                    None
+                } else {
+                    project
+                },
+                &config,
+                &store,
+            )
+            .map_err(|e| e.to_string())?;
+            if scope == retrieve::RetrievalScope::CrossProject {
+                let current = project.map(String::from);
+                let mut filtered: Vec<retrieve::ScoredEpisode> = raw
+                    .into_iter()
+                    .filter(|s| {
+                        if let Some(p) = &current
+                            && s.episode.project == *p
+                        {
+                            return true;
+                        }
+                        crate::episode::is_episode_transferable(&s.episode)
+                    })
+                    .collect();
+                filtered.truncate(limit);
+                filtered
+            } else {
+                raw
+            }
         }
     };
 

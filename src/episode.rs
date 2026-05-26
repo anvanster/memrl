@@ -206,6 +206,31 @@ impl ValidityScope {
             Self::Project { .. } => "project",
         }
     }
+
+    /// True if this claim transfers across projects (v0.10).
+    /// Project-scoped claims are explicitly bound to one codebase; every
+    /// other scope generalises by design — Forever and Language are
+    /// universally true, Crate is keyed on the dependency (not the
+    /// project), Domain is keyed on a problem space, and Workaround
+    /// points to a specific external issue.
+    pub fn is_transferable(&self) -> bool {
+        !matches!(self, Self::Project { .. })
+    }
+}
+
+/// True if this episode carries a transferable claim suitable for
+/// cross-project retrieval (v0.10). Conservative on the None case:
+/// pre-v0.6.4 captures without an explicit scope are treated as
+/// non-transferable so they don't bleed into other projects until an
+/// agent re-classifies them. An episode has to *declare* transferable
+/// intent to surface elsewhere.
+pub fn is_episode_transferable(ep: &Episode) -> bool {
+    ep.intent
+        .claim
+        .as_ref()
+        .and_then(|c| c.validity_scope.as_ref())
+        .map(|s| s.is_transferable())
+        .unwrap_or(false)
 }
 
 /// Per-day utility decay rate for an episode's scope. Calibration is from

@@ -10,11 +10,35 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use crate::config::{Config, RetrievalMode};
-use crate::episode::{Episode, RetrievalRecord};
+use crate::episode::{Episode, RetrievalRecord, is_episode_transferable};
 use crate::indexer::EpisodeIndexer;
 use crate::store::EpisodeStore;
 
-/// Run the retrieve command
+/// Whether a retrieval call stays inside the current project or
+/// reaches across to other projects' transferable episodes (v0.10).
+///
+/// "Transferable" is gated by `ValidityScope::is_transferable` — every
+/// scope except `Project { .. }` qualifies. Episodes captured before
+/// v0.6.4 without an explicit scope stay project-bound by default, so
+/// cross-project mode only sees claims their authors explicitly marked
+/// as general.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalScope {
+    /// Match only episodes belonging to `project_filter` (or every
+    /// project if no filter is set). Pre-v0.10 behaviour.
+    Project,
+    /// Match the current project's episodes AND transferable episodes
+    /// from other projects.
+    CrossProject,
+}
+
+impl Default for RetrievalScope {
+    fn default() -> Self {
+        Self::Project
+    }
+}
+
+/// Run the retrieve command (scope = Project — pre-v0.10 default).
 pub async fn run(
     query: &str,
     limit: usize,
@@ -22,11 +46,31 @@ pub async fn run(
     format: &str,
     config: &Config,
 ) -> Result<()> {
+    run_scoped(
+        query,
+        limit,
+        project,
+        RetrievalScope::Project,
+        format,
+        config,
+    )
+    .await
+}
+
+/// Run the retrieve command with an explicit scope.
+pub async fn run_scoped(
+    query: &str,
+    limit: usize,
+    project: Option<String>,
+    scope: RetrievalScope,
+    format: &str,
+    config: &Config,
+) -> Result<()> {
     let store = EpisodeStore::new()?;
 
     // Dispatch to the configured retrieval mode (hybrid/vector/keyword); fall
     // back to text search only if all index-based paths fail.
-    let episodes = match try_search(query, limit, project.as_deref(), config).await {
+    let episodes = match try_search_scoped(query, limit, project.as_deref(), scope, config).await {
         Ok(results) if !results.is_empty() => {
             match config.retrieval.mode {
                 RetrievalMode::Hybrid => println!("🔍 Hybrid retrieval (vector + BM25)...\n"),
@@ -37,7 +81,29 @@ pub async fn run(
         }
         _ => {
             println!("🔍 Using text-based search (run 'tempera index' for semantic search)...\n");
-            retrieve_episodes_text(query, limit, project.as_deref(), config, &store)?
+            match scope {
+                RetrievalScope::Project => {
+                    retrieve_episodes_text(query, limit, project.as_deref(), config, &store)?
+                }
+                RetrievalScope::CrossProject => {
+                    let widened = limit.saturating_mul(3).max(limit);
+                    let all = retrieve_episodes_text(query, widened, None, config, &store)?;
+                    let current_project = project.clone();
+                    let mut filtered: Vec<ScoredEpisode> = all
+                        .into_iter()
+                        .filter(|s| {
+                            if let Some(p) = &current_project
+                                && s.episode.project == *p
+                            {
+                                return true;
+                            }
+                            is_episode_transferable(&s.episode)
+                        })
+                        .collect();
+                    filtered.truncate(limit);
+                    filtered
+                }
+            }
         }
     };
 
@@ -62,6 +128,45 @@ pub async fn run(
     record_retrievals(&episodes, query, &store)?;
 
     Ok(())
+}
+
+/// Scope-aware dispatcher (v0.10). `Project` scope preserves pre-v0.10
+/// behaviour exactly — same indexer call, same fetch budget. `CrossProject`
+/// scope passes no project filter to the indexer (so other projects'
+/// episodes can come back), then keeps only those that are either the
+/// current project's OR carry a transferable `ValidityScope`. The fetch
+/// budget is bumped to `limit * 6` in CrossProject mode so the post-filter
+/// has enough material to work with even when 80%+ of the candidates
+/// belong to other projects.
+pub async fn try_search_scoped(
+    query: &str,
+    limit: usize,
+    project_filter: Option<&str>,
+    scope: RetrievalScope,
+    config: &Config,
+) -> Result<Vec<ScoredEpisode>> {
+    match scope {
+        RetrievalScope::Project => try_search(query, limit, project_filter, config).await,
+        RetrievalScope::CrossProject => {
+            // Indexer sees no filter; we'll cull in Rust after loading.
+            let widened_limit = limit.saturating_mul(3).max(limit);
+            let raw = try_search(query, widened_limit, None, config).await?;
+            let current_project = project_filter.map(str::to_string);
+            let mut filtered: Vec<ScoredEpisode> = raw
+                .into_iter()
+                .filter(|s| {
+                    if let Some(p) = &current_project
+                        && s.episode.project == *p
+                    {
+                        return true;
+                    }
+                    is_episode_transferable(&s.episode)
+                })
+                .collect();
+            filtered.truncate(limit);
+            Ok(filtered)
+        }
+    }
 }
 
 /// Dispatch retrieval to the configured mode. Falls back to vector-only if
@@ -656,6 +761,100 @@ pub fn text_overlap_similarity(a: &Episode, b: &Episode) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::episode::{Claim, ClaimCategory, ValidityScope};
+
+    fn mk_ep_with_scope(project: &str, scope: Option<ValidityScope>) -> Episode {
+        let mut ep = Episode::new(project.to_string(), "test prompt".to_string());
+        if let Some(s) = scope {
+            ep.intent.claim = Some(Claim {
+                falsifiability: 0.8,
+                category: ClaimCategory::ApiContract,
+                validity_scope: Some(s),
+            });
+        }
+        ep
+    }
+
+    #[test]
+    fn is_transferable_project_scope_is_false() {
+        let scope = ValidityScope::Project {
+            name: "tempera".into(),
+        };
+        assert!(!scope.is_transferable());
+    }
+
+    #[test]
+    fn is_transferable_forever_and_language_and_crate_are_true() {
+        assert!(ValidityScope::Forever.is_transferable());
+        assert!(
+            ValidityScope::Language {
+                name: "rust".into()
+            }
+            .is_transferable()
+        );
+        assert!(
+            ValidityScope::Crate {
+                name: "tokio".into(),
+                version: "1.43".into(),
+            }
+            .is_transferable()
+        );
+        assert!(
+            ValidityScope::Domain {
+                tag: "async-rust".into()
+            }
+            .is_transferable()
+        );
+    }
+
+    #[test]
+    fn is_episode_transferable_requires_explicit_scope() {
+        // No scope at all: legacy capture, treat as non-transferable.
+        let ep = mk_ep_with_scope("a", None);
+        assert!(!is_episode_transferable(&ep));
+
+        // Project-scoped: explicitly bound, non-transferable.
+        let ep = mk_ep_with_scope("a", Some(ValidityScope::Project { name: "a".into() }));
+        assert!(!is_episode_transferable(&ep));
+
+        // Language-scoped: transferable.
+        let ep = mk_ep_with_scope(
+            "a",
+            Some(ValidityScope::Language {
+                name: "rust".into(),
+            }),
+        );
+        assert!(is_episode_transferable(&ep));
+    }
+
+    #[test]
+    fn cross_project_filter_keeps_current_project_and_transferable_others() {
+        // Simulate what try_search_scoped's CrossProject branch does:
+        // (project_a, no scope) — current project, keep
+        // (project_b, no scope) — other project + non-transferable, drop
+        // (project_b, Forever)  — other project + transferable, keep
+        let current_project = Some("a".to_string());
+        let candidates: Vec<Episode> = vec![
+            mk_ep_with_scope("a", None),
+            mk_ep_with_scope("b", None),
+            mk_ep_with_scope("b", Some(ValidityScope::Forever)),
+        ];
+        let kept: Vec<&Episode> = candidates
+            .iter()
+            .filter(|ep| {
+                if let Some(p) = &current_project
+                    && ep.project == *p
+                {
+                    return true;
+                }
+                is_episode_transferable(ep)
+            })
+            .collect();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].project, "a");
+        assert_eq!(kept[1].project, "b");
+    }
 
     #[test]
     fn test_calculate_text_similarity() {

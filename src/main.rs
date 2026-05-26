@@ -90,6 +90,13 @@ enum Commands {
         /// Output format (markdown, json)
         #[arg(long, default_value = "markdown")]
         format: String,
+
+        /// Include transferable episodes from other projects
+        /// (v0.10): claims with ValidityScope ∈ {Forever, Language,
+        /// Crate, Domain, Workaround} surface; Project-scoped claims
+        /// from other projects are filtered out.
+        #[arg(long)]
+        cross_project: bool,
     },
 
     /// Record feedback on retrieved episodes
@@ -692,8 +699,14 @@ async fn main() -> Result<()> {
             limit,
             project,
             format,
+            cross_project,
         } => {
-            retrieve::run(&query, limit, project, &format, &config).await?;
+            let scope = if cross_project {
+                retrieve::RetrievalScope::CrossProject
+            } else {
+                retrieve::RetrievalScope::Project
+            };
+            retrieve::run_scoped(&query, limit, project, scope, &format, &config).await?;
         }
 
         Commands::Feedback {
