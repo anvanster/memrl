@@ -15,6 +15,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 mod backup;
+mod calibration;
 mod capture;
 mod config;
 mod contradict;
@@ -320,6 +321,24 @@ enum Commands {
         list: bool,
 
         /// Emit a JSON report instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// View the per-bucket calibration profile — how often this agent's
+    /// declared "success" claims actually survive into StableNoRevert.
+    /// Buckets are keyed by `(task_type, project)`. v0.8.1 surfaces the
+    /// data; v0.8.x will apply the overconfidence rate at retrieval time.
+    Calibration {
+        /// Filter by task type (e.g. bugfix, feature, refactor).
+        #[arg(long)]
+        task_type: Option<String>,
+
+        /// Filter by project name.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Emit buckets as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -859,6 +878,74 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Calibration {
+            task_type,
+            project,
+            json,
+        } => {
+            let cal = calibration::CalibrationStore::open_default().await?;
+            let mut buckets = if let Some(p) = &project {
+                cal.list_by_project(p).await?
+            } else {
+                cal.list_all().await?
+            };
+            if let Some(tt) = &task_type {
+                buckets.retain(|b| b.task_type.eq_ignore_ascii_case(tt));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&buckets)?);
+            } else if buckets.is_empty() {
+                println!("No calibration data yet.");
+                println!(
+                    "  Buckets accumulate on every capture (declared) and verification advance"
+                );
+                println!("  to StableNoRevert+ (verified). Run `tempera capture` and");
+                println!("  `tempera advance-verification` to populate.");
+            } else {
+                use colored::Colorize;
+                println!();
+                println!(
+                    "{}  ({} bucket{})",
+                    "Calibration profile".bold(),
+                    buckets.len(),
+                    if buckets.len() == 1 { "" } else { "s" }
+                );
+                println!(
+                    "  {:<10} {:<22} {:>5} {:>5} {:>5} {:>7}",
+                    "task", "project", "decl", "ver", "fail", "verif%"
+                );
+                for b in &buckets {
+                    let ratio = b.verified_ratio() * 100.0;
+                    let ratio_str = format!("{:.0}%", ratio);
+                    let ratio_colored = if b.declared_success < 5 {
+                        ratio_str.dimmed()
+                    } else if ratio >= 70.0 {
+                        ratio_str.green()
+                    } else if ratio >= 40.0 {
+                        ratio_str.yellow()
+                    } else {
+                        ratio_str.red()
+                    };
+                    let proj_truncated: String = b.project.chars().take(22).collect();
+                    println!(
+                        "  {:<10} {:<22} {:>5} {:>5} {:>5} {:>7}",
+                        b.task_type,
+                        proj_truncated,
+                        b.declared_success,
+                        b.verified_success,
+                        b.declared_failure,
+                        ratio_colored
+                    );
+                }
+                println!();
+                println!(
+                    "  {}",
+                    "note: buckets with <5 declared are dim — too small to read.".dimmed()
+                );
+                println!();
+            }
+        }
+
         Commands::AdvanceVerification {
             episode,
             to,
@@ -872,6 +959,11 @@ async fn main() -> Result<()> {
             let old_label = ep.outcome.verification.label();
             ep.set_verification(new_state.clone());
             store.update(&ep)?;
+            // v0.8.1: bump calibration if we reached a verified state.
+            // Best-effort; advance still succeeds if the store can't open.
+            if let Ok(cal) = calibration::CalibrationStore::open_default().await {
+                let _ = calibration::record_verification_advance(&cal, &ep).await;
+            }
             println!(
                 "{} {} → {}",
                 &ep.id[..8.min(ep.id.len())],

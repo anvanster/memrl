@@ -18,6 +18,7 @@
 use anyhow::Result;
 use std::io::{self, BufRead, Write};
 
+mod calibration;
 mod config;
 mod episode;
 mod feedback;

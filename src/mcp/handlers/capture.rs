@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 use crate::mcp::helpers::{extract_project, extract_string_array};
-use crate::{config, episode, fingerprint, indexer, store, utility};
+use crate::{calibration, config, episode, fingerprint, indexer, store, utility};
 
 /// Capture a new episode, consolidating with existing BKMs when similar
 pub(crate) async fn handle(args: &Value) -> Result<String, String> {
@@ -131,6 +131,12 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     // Index the new episode
     if let Ok(mut indexer) = indexer::EpisodeIndexer::new().await {
         let _ = indexer.index_episode(&ep).await;
+    }
+
+    // v0.8.1: bump calibration bucket. Best-effort — store unavailable
+    // doesn't fail the capture.
+    if let Ok(cal) = calibration::CalibrationStore::open_default().await {
+        let _ = calibration::record_capture(&cal, &ep).await;
     }
 
     let mut output = format!(
