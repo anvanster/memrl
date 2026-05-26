@@ -30,6 +30,7 @@ mod mistakes;
 mod retrieve;
 mod stats;
 mod store;
+mod templates;
 mod utility;
 
 #[tokio::main]

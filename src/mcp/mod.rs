@@ -95,6 +95,7 @@ impl McpServer {
             "tempera_propagate" => handlers::propagate::handle(&arguments).await,
             "tempera_review" => handlers::review::handle(&arguments).await,
             "tempera_log_correction" => handlers::log_correction::handle(&arguments).await,
+            "tempera_template" => handlers::template::handle(&arguments).await,
             _ => Err(format!("Unknown tool: {}", name)),
         };
 

@@ -255,5 +255,23 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                 "required": ["category", "description", "correction"]
             }),
         },
+        Tool {
+            name: "tempera_template".to_string(),
+            description: "Pull the reasoning template that worked for a (task_type, domain) pair the last time tempera observed several successful episodes there. Call this at task start, BEFORE you start exploring or editing, when the kind of task is clear — e.g. (bugfix, async-rust), (refactor, sqlx-migrations), (feature, mcp-handlers). The response is an ordered list of steps the agent has historically followed when this kind of task succeeded; treat them as a starting checklist, not a rigid script. If no template exists yet for the pair, fall back to tempera_retrieve. Templates accrue during the dream cycle — they get better with use, so missing template = early days, not an error.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_type": {
+                        "type": "string",
+                        "description": "One of: bugfix | feature | refactor | test | docs | research | debug | setup. Case-insensitive."
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain tag the task touches, e.g. 'rust', 'async-rust', 'sqlx', 'mcp-handlers'. Must match one of the domains episodes were tagged with during capture."
+                    }
+                },
+                "required": ["task_type", "domain"]
+            }),
+        },
     ]
 }

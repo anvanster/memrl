@@ -72,6 +72,18 @@ pub struct DreamConfig {
     /// below this don't get stored (treated as ambiguous).
     #[serde(default = "default_contradict_min_confidence")]
     pub contradict_min_confidence: f32,
+    /// Minimum cluster size before a reasoning template gets authored
+    /// (v0.8.3). 3 = "show the pattern at least three times before I
+    /// trust it as repeatable."
+    #[serde(default = "default_templates_min_evidence")]
+    pub templates_min_evidence: usize,
+    /// Minimum verification weight for an episode to qualify as
+    /// template evidence. 0.30 = `Untested` (accept everything that's
+    /// at least a self-declared success); 0.60 = `Merged` (only count
+    /// what survived review). Starts lenient — tighten as verification
+    /// adoption grows.
+    #[serde(default = "default_templates_min_verification_weight")]
+    pub templates_min_verification_weight: f32,
 }
 
 impl Default for DreamConfig {
@@ -90,6 +102,8 @@ impl Default for DreamConfig {
             contradict_max_similarity: default_contradict_max_similarity(),
             contradict_max_pairs: default_contradict_max_pairs(),
             contradict_min_confidence: default_contradict_min_confidence(),
+            templates_min_evidence: default_templates_min_evidence(),
+            templates_min_verification_weight: default_templates_min_verification_weight(),
         }
     }
 }
@@ -467,6 +481,16 @@ fn default_contradict_max_pairs() -> usize {
 
 fn default_contradict_min_confidence() -> f32 {
     0.7
+}
+
+fn default_templates_min_evidence() -> usize {
+    3
+}
+
+fn default_templates_min_verification_weight() -> f32 {
+    // 0.30 = Untested. Lenient default so templates kick in early.
+    // Bump to 0.60 (Merged) when verify_advance is widely adopted.
+    0.30
 }
 
 fn default_consolidation_threshold() -> f32 {

@@ -33,6 +33,8 @@ use crate::episode::VerificationState;
 use crate::patterns;
 use crate::reflect;
 use crate::store::EpisodeStore;
+use crate::templates;
+use crate::templates_phase;
 use crate::triage;
 
 /// All dream phases that exist today. Add a variant + a match arm in
@@ -53,6 +55,9 @@ pub enum PhaseName {
     /// Probe pairs of frequently-retrieved episodes for factual
     /// contradictions (v0.7.5+). Persists findings + Wilson CI.
     Contradict,
+    /// Group successful episodes by `(task_type, domain)` and extract
+    /// reusable reasoning templates via Sonnet (v0.8.3+).
+    Templates,
 }
 
 impl PhaseName {
@@ -63,6 +68,7 @@ impl PhaseName {
             Self::Reflect => "reflect",
             Self::Patterns => "patterns",
             Self::Contradict => "contradict",
+            Self::Templates => "templates",
         }
     }
 }
@@ -76,8 +82,9 @@ impl FromStr for PhaseName {
             "reflect" => Self::Reflect,
             "patterns" => Self::Patterns,
             "contradict" => Self::Contradict,
+            "templates" => Self::Templates,
             other => anyhow::bail!(
-                "unknown phase '{other}' (expected: verify_advance | decay | reflect | patterns | contradict)"
+                "unknown phase '{other}' (expected: verify_advance | decay | reflect | patterns | contradict | templates)"
             ),
         })
     }
@@ -98,6 +105,7 @@ const FULL_CYCLE_ORDER: &[PhaseName] = &[
     PhaseName::Reflect,
     PhaseName::Patterns,
     PhaseName::Contradict,
+    PhaseName::Templates,
 ];
 
 pub fn all_phases() -> &'static [PhaseName] {
@@ -231,6 +239,12 @@ fn estimate(phase: PhaseName) -> CostEstimate {
             usd: contradict::JUDGE_ESTIMATED_COST_USD * 30.0,
             estimated_seconds: 60,
         },
+        // Templates: assume up to 5 task/domain buckets generate
+        // templates per run. Most projects will produce 0–2.
+        PhaseName::Templates => CostEstimate {
+            usd: templates::TEMPLATE_ESTIMATED_COST_USD * 5.0,
+            estimated_seconds: 45,
+        },
     }
 }
 
@@ -248,6 +262,7 @@ async fn dispatch(phase: PhaseName, ctx: &PhaseContext<'_>) -> Result<PhaseRepor
         PhaseName::Reflect => run_reflect(ctx).await?,
         PhaseName::Patterns => run_patterns(ctx).await?,
         PhaseName::Contradict => run_contradict(ctx).await?,
+        PhaseName::Templates => run_templates_phase(ctx).await?,
     };
     Ok(PhaseReport {
         name: phase,
@@ -546,6 +561,33 @@ async fn run_contradict(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, 
             report.by_severity.high,
             report.by_severity.medium,
             report.by_severity.low,
+        )
+    };
+    Ok((PhaseStatus::Ok, summary, cost_usd))
+}
+
+/// v0.8.3: group successful episodes by (task_type, domain) and ask
+/// Sonnet to extract the reasoning steps that worked. Produces one
+/// row per (task_type, domain) pair with a non-trivial cluster.
+async fn run_templates_phase(ctx: &PhaseContext<'_>) -> Result<(PhaseStatus, String, f32)> {
+    let report = templates_phase::run_templates(ctx.config, Some(ctx.budget))
+        .await
+        .context("templates phase failed")?;
+    let cost_usd = report.templates_written as f32 * templates::TEMPLATE_ESTIMATED_COST_USD;
+    let summary = if report.episodes_eligible < ctx.config.dream.templates_min_evidence {
+        format!(
+            "{} eligible episode(s) — below min_evidence {} (no extraction)",
+            report.episodes_eligible, ctx.config.dream.templates_min_evidence
+        )
+    } else {
+        format!(
+            "examined {} episodes ({} eligible), {} buckets ({} above min), {} template(s) written, {} themeless",
+            report.episodes_examined,
+            report.episodes_eligible,
+            report.buckets_found,
+            report.buckets_above_min,
+            report.templates_written,
+            report.buckets_no_template,
         )
     };
     Ok((PhaseStatus::Ok, summary, cost_usd))

@@ -35,6 +35,8 @@ mod reflect;
 mod retrieve;
 mod stats;
 mod store;
+mod templates;
+mod templates_phase;
 mod triage;
 mod utility;
 
@@ -398,6 +400,15 @@ enum Commands {
         json: bool,
     },
 
+    /// Inspect or extract reasoning templates (v0.8.3). Templates are
+    /// stored per `(task_type, domain)` pair and surface via the
+    /// `tempera_template` MCP tool; this CLI exposes them for humans
+    /// and offers a manual extraction trigger.
+    Templates {
+        #[command(subcommand)]
+        command: TemplatesCommand,
+    },
+
     /// Move an episode's verification state forward (manual; future
     /// versions add git/test hooks that do this automatically)
     AdvanceVerification {
@@ -420,6 +431,47 @@ enum Commands {
         /// Days stable (used when --to stable_no_revert; default 1)
         #[arg(long)]
         days: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplatesCommand {
+    /// List all stored templates (most recent first).
+    List {
+        /// Filter by task type.
+        #[arg(long)]
+        task_type: Option<String>,
+
+        /// Filter by domain.
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Emit as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Fetch a single template by (task_type, domain).
+    Get {
+        #[arg(long)]
+        task_type: String,
+        #[arg(long)]
+        domain: String,
+
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Run the templates dream phase right now (Sonnet-backed).
+    /// Bounded by `--max-usd`.
+    Extract {
+        /// Dollar cap (default: dream.default_max_usd from config).
+        #[arg(long)]
+        max_usd: Option<f32>,
+
+        /// Print what would be done without spending budget.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1055,6 +1107,10 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Templates { command } => {
+            handle_templates_command(command).await?;
+        }
+
         Commands::Calibration {
             task_type,
             project,
@@ -1265,6 +1321,128 @@ async fn main() -> Result<()> {
         },
     }
 
+    Ok(())
+}
+
+async fn handle_templates_command(command: TemplatesCommand) -> Result<()> {
+    use colored::Colorize;
+    let store = templates::TemplateStore::open_default().await?;
+    match command {
+        TemplatesCommand::List {
+            task_type,
+            domain,
+            json,
+        } => {
+            let mut all = store.list_all().await?;
+            if let Some(tt) = &task_type {
+                all.retain(|t| t.task_type.eq_ignore_ascii_case(tt));
+            }
+            if let Some(d) = &domain {
+                all.retain(|t| t.domain.eq_ignore_ascii_case(d));
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
+                return Ok(());
+            }
+            if all.is_empty() {
+                println!("No reasoning templates yet.");
+                println!("  Templates accrue during the dream cycle once at least");
+                println!("  3 successful episodes share a (task_type, domain) bucket.");
+                println!("  Run `tempera templates extract` to author them now.");
+                return Ok(());
+            }
+            println!();
+            println!(
+                "{} ({} template{})",
+                "Reasoning templates".bold(),
+                all.len(),
+                if all.len() == 1 { "" } else { "s" }
+            );
+            for t in &all {
+                println!(
+                    "  [{tt} / {dom}] {name}",
+                    tt = t.task_type.cyan(),
+                    dom = t.domain.cyan(),
+                    name = t.name.bold()
+                );
+                println!(
+                    "    success_rate {sr:.2}  evidence {ev}  used {used}×",
+                    sr = t.success_rate,
+                    ev = t.evidence_episodes.len(),
+                    used = t.times_used
+                );
+                for (i, step) in t.steps.iter().enumerate() {
+                    println!("    {}. {}", (i + 1).to_string().dimmed(), step);
+                }
+            }
+            println!();
+        }
+
+        TemplatesCommand::Get {
+            task_type,
+            domain,
+            json,
+        } => {
+            let Some(t) = store
+                .get_by_pair(&task_type.to_lowercase(), &domain)
+                .await?
+            else {
+                println!(
+                    "No template for ({task_type}, {domain}). \
+                     Try `tempera templates list` to see what's stored."
+                );
+                return Ok(());
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(());
+            }
+            println!();
+            println!(
+                "{} {} / {}",
+                "Template:".bold(),
+                t.task_type.cyan(),
+                t.domain.cyan()
+            );
+            println!("  {}", t.name.bold());
+            println!(
+                "  success_rate {sr:.2}  evidence {ev}  used {used}×",
+                sr = t.success_rate,
+                ev = t.evidence_episodes.len(),
+                used = t.times_used
+            );
+            println!();
+            println!("Steps:");
+            for (i, step) in t.steps.iter().enumerate() {
+                println!("  {}. {}", i + 1, step);
+            }
+            if !t.evidence_episodes.is_empty() {
+                println!();
+                println!("Evidence episodes:");
+                for id in &t.evidence_episodes {
+                    println!("  - {id}");
+                }
+            }
+            println!();
+        }
+
+        TemplatesCommand::Extract { max_usd, dry_run } => {
+            let cfg = config::Config::load().unwrap_or_default();
+            let cap = max_usd.unwrap_or(cfg.dream.default_max_usd);
+            if dry_run {
+                println!("{} would run with budget cap ${cap:.2}", "Dry-run:".bold());
+                println!("  Templates phase scans all Success+verified episodes, groups by");
+                println!(
+                    "  (task_type, domain), authors templates for buckets ≥{} episodes.",
+                    cfg.dream.templates_min_evidence
+                );
+                println!("  Estimated worst case: ~5 buckets × $0.05 = $0.25");
+                return Ok(());
+            }
+            let report = dream::run_one(dream::PhaseName::Templates, &cfg, cap).await?;
+            dream::print_cycle(&report, false);
+        }
+    }
     Ok(())
 }
 
