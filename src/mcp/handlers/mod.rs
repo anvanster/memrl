@@ -8,6 +8,7 @@ pub(crate) mod log_should_have_asked;
 pub(crate) mod propagate;
 pub(crate) mod retrieve;
 pub(crate) mod review;
+pub(crate) mod session_start;
 pub(crate) mod stats;
 pub(crate) mod status;
 pub(crate) mod template;

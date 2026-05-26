@@ -291,6 +291,19 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "tempera_session_start".to_string(),
+            description: "Call this ONCE at the very start of a session in a project — before you start exploring, reading files, or planning. If tempera previously observed an episode in this project end in failure/partial with vague intent, it drafted ONE clarifying question via Haiku. This tool returns that question so you can ask the user before guessing the same way again. If there's no pending question the response says so and you can proceed normally. Calling this is cheap (one DB lookup) and the question gets marked 'served' so it won't surface again. Best-paired with tempera_template and tempera_retrieve as the standard session-warmup trio.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name (default: auto-detect from working directory)."
+                    }
+                }
+            }),
+        },
+        Tool {
             name: "tempera_template".to_string(),
             description: "Pull the reasoning template that worked for a (task_type, domain) pair the last time tempera observed several successful episodes there. Call this at task start, BEFORE you start exploring or editing, when the kind of task is clear — e.g. (bugfix, async-rust), (refactor, sqlx-migrations), (feature, mcp-handlers). The response is an ordered list of steps the agent has historically followed when this kind of task succeeded; treat them as a starting checklist, not a rigid script. If no template exists yet for the pair, fall back to tempera_retrieve. Templates accrue during the dream cycle — they get better with use, so missing template = early days, not an error.".to_string(),
             input_schema: json!({

@@ -19,7 +19,7 @@ pub async fn run(
     project: Option<PathBuf>,
     extract_intent: bool,
     capture_diff: bool,
-    _config: &Config,
+    config: &Config,
 ) -> Result<()> {
     let project_dir = project.unwrap_or_else(|| std::env::current_dir().unwrap());
     let project_name = extract_project_name(&project_dir);
@@ -71,6 +71,23 @@ pub async fn run(
                 let diff_path = store.save_diff(&episode, &diff)?;
                 println!("📄 Diff saved: {}", diff_path.display());
             }
+        }
+    }
+
+    // v0.8.5: best-effort ask-back generation. If the episode ended in
+    // Failure/Partial with vague intent, draft one clarifying question
+    // for the next session via Haiku. Debounced via DB partial unique
+    // index — at most one pending ask-back per project at a time.
+    if config.capture.ask_back_on_failure && crate::ask_back_gen::is_ask_back_candidate(&episode) {
+        match crate::ask_back_gen::maybe_generate_and_record(&episode, config).await {
+            Ok(true) => {
+                println!(
+                    "💭 Queued an ask-back for next session in {} (run `tempera session-start` to see it).",
+                    project_name
+                );
+            }
+            Ok(false) => {} // candidate but suppressed (already pending / model declined / DB issue)
+            Err(_) => {}    // best-effort: never fail capture on ask-back errors
         }
     }
 

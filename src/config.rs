@@ -116,6 +116,13 @@ pub struct CaptureConfig {
     pub extract_intent_llm: bool,
     #[serde(default = "default_true")]
     pub capture_diffs: bool,
+    /// When an episode ends in Failure/Partial with vague intent (v0.8.5),
+    /// draft one Haiku-class clarifying question and queue it for the
+    /// next session in the same project. Cheap (~$0.002/call) and
+    /// debounced via at-most-one-pending-per-project at the DB layer.
+    /// Default on; set to false to fully disable the surface.
+    #[serde(default = "default_true")]
+    pub ask_back_on_failure: bool,
 }
 
 impl Default for CaptureConfig {
@@ -124,6 +131,7 @@ impl Default for CaptureConfig {
             auto_capture: true,
             extract_intent_llm: true,
             capture_diffs: true,
+            ask_back_on_failure: true,
         }
     }
 }

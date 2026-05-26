@@ -99,6 +99,7 @@ impl McpServer {
                 handlers::log_should_have_asked::handle(&arguments).await
             }
             "tempera_template" => handlers::template::handle(&arguments).await,
+            "tempera_session_start" => handlers::session_start::handle(&arguments).await,
             _ => Err(format!("Unknown tool: {}", name)),
         };
 

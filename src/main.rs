@@ -14,6 +14,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+mod ask_back_gen;
+mod ask_backs;
 mod asks;
 mod backup;
 mod calibration;
@@ -397,6 +399,31 @@ enum Commands {
         project: Option<String>,
 
         /// Emit buckets as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the pending ask-back for a project, if any, and mark it
+    /// served (v0.8.5). Mirrors the `tempera_session_start` MCP tool
+    /// so humans can see what's queued.
+    SessionStart {
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// View ask-back history (v0.8.5) — questions drafted by capture
+    /// after vague-intent failures. Filter by project or status.
+    AskBacks {
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Show only pending (default: all).
+        #[arg(long)]
+        pending: bool,
+
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+
         #[arg(long)]
         json: bool,
     },
@@ -1154,6 +1181,86 @@ async fn main() -> Result<()> {
                     }
                     println!();
                 }
+            }
+        }
+
+        Commands::SessionStart { project } => {
+            let project = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+            let store = ask_backs::AskBackStore::open_default().await?;
+            match store.get_pending_for_project(&project).await? {
+                Some(ab) => {
+                    use colored::Colorize;
+                    if let Some(id) = ab.id {
+                        let _ = store.mark_served(id).await;
+                    }
+                    println!();
+                    println!("{} {}:", "Pending ask-back for".bold(), project.cyan());
+                    println!("  📌 {}", ab.question);
+                    println!();
+                    println!(
+                        "  drafted after episode {ep8} (model {model}, {when})",
+                        ep8 = &ab.episode_id[..8.min(ab.episode_id.len())],
+                        model = ab.model.dimmed(),
+                        when = ab.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed(),
+                    );
+                    println!();
+                }
+                None => {
+                    println!("No pending ask-back for {project}.");
+                }
+            }
+        }
+
+        Commands::AskBacks {
+            project,
+            pending,
+            limit,
+            json,
+        } => {
+            let store = ask_backs::AskBackStore::open_default().await?;
+            let mut rows = match project.as_deref() {
+                Some(p) => store.list_by_project(p, limit).await?,
+                None => store.list_all(limit).await?,
+            };
+            if pending {
+                rows.retain(|r| r.status == ask_backs::AskBackStatus::Pending);
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("No ask-backs found.");
+            } else {
+                use colored::Colorize;
+                println!();
+                println!(
+                    "{} ({} row{})",
+                    "Ask-backs".bold(),
+                    rows.len(),
+                    if rows.len() == 1 { "" } else { "s" }
+                );
+                for ab in &rows {
+                    let when = ab.created_at.format("%Y-%m-%d %H:%M").to_string();
+                    let status_colored = match ab.status {
+                        ask_backs::AskBackStatus::Pending => "pending".yellow(),
+                        ask_backs::AskBackStatus::Served => "served".green(),
+                        ask_backs::AskBackStatus::Dismissed => "dismissed".dimmed(),
+                    };
+                    let ep8 = &ab.episode_id[..8.min(ab.episode_id.len())];
+                    println!(
+                        "  [{}] {} {} {}",
+                        status_colored,
+                        ab.project.cyan(),
+                        ep8.dimmed(),
+                        when.dimmed()
+                    );
+                    println!("    {}", ab.question);
+                }
+                println!();
             }
         }
 
