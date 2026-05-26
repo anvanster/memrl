@@ -29,6 +29,7 @@ mod indexer;
 mod jobs;
 mod keyword;
 mod llm;
+mod mistakes;
 mod patterns;
 mod reflect;
 mod retrieve;
@@ -321,6 +322,60 @@ enum Commands {
         list: bool,
 
         /// Emit a JSON report instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Log a correction the user made to an assumption / decision /
+    /// piece of code. Mirrors the `tempera_log_correction` MCP tool
+    /// so humans can record offline corrections too.
+    LogCorrection {
+        /// Topic label (will be normalized to lowercase snake_case).
+        #[arg(long)]
+        category: String,
+
+        /// One sentence: what was wrong.
+        #[arg(long)]
+        description: String,
+
+        /// What the user said the right thing was.
+        #[arg(long)]
+        correction: String,
+
+        /// Optional episode id (full or 8-char prefix).
+        #[arg(long)]
+        episode: Option<String>,
+
+        /// Comma-separated list of files involved.
+        #[arg(long)]
+        files: Option<String>,
+
+        /// Override project name (default: auto-detect from CWD).
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// View the anchored-mistakes index. Filter by project/category,
+    /// or show `--top` to see the most-corrected categories per
+    /// project.
+    Mistakes {
+        /// Filter by project (default: all projects).
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Filter by category.
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Show top-N categories by count instead of the raw list.
+        #[arg(long)]
+        top: Option<i64>,
+
+        /// Result limit for the raw list.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+
+        /// Emit as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -875,6 +930,128 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 dream::print_cycle(&report, dry_run);
+            }
+        }
+
+        Commands::LogCorrection {
+            category,
+            description,
+            correction,
+            episode,
+            files,
+            project,
+        } => {
+            let project = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+            let files_vec: Vec<String> = files
+                .map(|s| s.split(',').map(|f| f.trim().to_string()).collect())
+                .unwrap_or_default();
+            let category_norm = mistakes::normalize_category(&category);
+            if category_norm.is_empty() {
+                anyhow::bail!("--category cannot be empty after normalization");
+            }
+            // Resolve short episode prefix → full id if provided.
+            let episode_id = if let Some(id) = episode {
+                let s = store::EpisodeStore::new()?;
+                s.load(&id).ok().map(|ep| ep.id).or(Some(id))
+            } else {
+                None
+            };
+            let m = mistakes::Mistake {
+                id: None,
+                project: project.clone(),
+                category: category_norm.clone(),
+                episode_id,
+                files: files_vec,
+                description,
+                correction,
+                created_at: chrono::Utc::now(),
+            };
+            let store = mistakes::MistakeStore::open_default().await?;
+            let id = store.record(&m).await?;
+            println!("Logged correction #{id} in [{project}] / category {category_norm}");
+        }
+
+        Commands::Mistakes {
+            project,
+            category,
+            top,
+            limit,
+            json,
+        } => {
+            let store = mistakes::MistakeStore::open_default().await?;
+            if let Some(n) = top {
+                let cats = store.top_categories(project.as_deref(), n).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&cats)?);
+                } else if cats.is_empty() {
+                    println!("No mistakes logged yet.");
+                } else {
+                    use colored::Colorize;
+                    println!();
+                    println!(
+                        "{} (top {})",
+                        "Top correction categories".bold(),
+                        cats.len()
+                    );
+                    for c in &cats {
+                        let last = c.last_seen.format("%Y-%m-%d").to_string();
+                        let count_str = format!("{}×", c.count);
+                        let count_colored = if c.count >= 5 {
+                            count_str.red()
+                        } else if c.count >= 3 {
+                            count_str.yellow()
+                        } else {
+                            count_str.normal()
+                        };
+                        println!("  {:<6} {:<30} (last: {})", count_colored, c.category, last);
+                    }
+                    println!();
+                }
+            } else {
+                let rows = store
+                    .list(project.as_deref(), category.as_deref(), limit)
+                    .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else if rows.is_empty() {
+                    println!("No mistakes match those filters.");
+                } else {
+                    use colored::Colorize;
+                    println!();
+                    println!(
+                        "{} ({} row{})",
+                        "Anchored mistakes".bold(),
+                        rows.len(),
+                        if rows.len() == 1 { "" } else { "s" }
+                    );
+                    for m in &rows {
+                        let when = m.created_at.format("%Y-%m-%d %H:%M").to_string();
+                        let cat_colored = m.category.cyan();
+                        let id8 = m
+                            .episode_id
+                            .as_deref()
+                            .map(|s| &s[..8.min(s.len())])
+                            .unwrap_or("--------");
+                        println!(
+                            "  [{}] {} {} {}",
+                            cat_colored,
+                            m.project.dimmed(),
+                            id8.dimmed(),
+                            when.dimmed()
+                        );
+                        println!("    wrong:    {}", m.description);
+                        println!("    right:    {}", m.correction);
+                        if !m.files.is_empty() {
+                            println!("    files:    {}", m.files.join(", ").dimmed());
+                        }
+                    }
+                    println!();
+                }
             }
         }
 

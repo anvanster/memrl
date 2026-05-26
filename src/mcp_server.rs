@@ -26,6 +26,7 @@ mod fingerprint;
 mod indexer;
 mod keyword;
 mod mcp;
+mod mistakes;
 mod retrieve;
 mod stats;
 mod store;

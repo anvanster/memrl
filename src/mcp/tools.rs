@@ -220,5 +220,40 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                 }
             }),
         },
+        Tool {
+            name: "tempera_log_correction".to_string(),
+            description: "Log a correction the user just made to your assumption, decision, or code. Call this when you notice a user turn is a correction — \"actually X\", \"that's wrong, Y\", \"you missed Z\", \"don't do A, do B\" — not when they're affirming or continuing. Categorize so similar corrections cluster: prefer kebab-case or snake_case topic labels like 'lifetime_annotations', 'test_setup', 'auth_middleware_order'. The future `tempera_brief` surfaces top correction categories for files you're about to edit, so logging consistently makes future-you smarter. DON'T log routine refinements (typos, formatting). DO log: factual errors you made, assumptions you held that turned out wrong, patterns the user had to correct twice.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "Short topic label, e.g. 'lifetime_annotations', 'test_setup', 'auth_middleware_order'. Normalized to lowercase snake_case on save so 'Test Setup' and 'test-setup' merge."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One sentence: what you got wrong. Plain English, not a commit message."
+                    },
+                    "correction": {
+                        "type": "string",
+                        "description": "What the user said the right thing was."
+                    },
+                    "episode_id": {
+                        "type": "string",
+                        "description": "Optional: the episode this correction happened during (full or 8-char prefix)."
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Files involved — populates future per-file warning surfaces."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Override project name (default: auto-detect from working directory)."
+                    }
+                },
+                "required": ["category", "description", "correction"]
+            }),
+        },
     ]
 }
