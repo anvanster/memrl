@@ -318,6 +318,11 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
                     "project": {
                         "type": "string",
                         "description": "Project name (default: auto-detect from working directory)."
+                    },
+                    "cross_project": {
+                        "type": "boolean",
+                        "description": "v0.10.2: when true, the mistakes + should-have-asked sections also surface rows from OTHER projects whose files overlap. Foreign-project rows are tagged `[from <project>]` so you can see the boundary. Use when current project has thin history but the working set is in a well-understood language/framework — corrections that recur across projects (lifetime errors, sqlx patterns) are often more useful than the noise of one project. Pending ask-back, calibration, and template sections stay project-scoped regardless — those signals don't generalize.",
+                        "default": false
                     }
                 },
                 "required": ["files"]

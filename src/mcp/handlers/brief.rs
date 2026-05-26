@@ -27,10 +27,20 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
         .get("domain")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let cross_project = args
+        .get("cross_project")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
-    let b = brief::build_brief(&project, &files, task_type.as_deref(), domain.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
+    let b = brief::build_brief_scoped(
+        &project,
+        &files,
+        task_type.as_deref(),
+        domain.as_deref(),
+        cross_project,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(brief::render_text(&b))
 }

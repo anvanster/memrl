@@ -82,11 +82,29 @@ impl Brief {
 /// any store-open or query failure produces a `None` / empty for that
 /// section without failing the whole brief. The agent gets partial
 /// information rather than an error response.
+///
+/// Pre-v0.10.2 signature retained — defaults to project-scoped brief.
 pub async fn build_brief(
     project: &str,
     files: &[String],
     task_type: Option<&str>,
     domain: Option<&str>,
+) -> Result<Brief> {
+    build_brief_scoped(project, files, task_type, domain, false).await
+}
+
+/// Scoped variant (v0.10.2): when `cross_project = true`, the
+/// mistakes and should-have-asked sections gain rows from projects
+/// OTHER than `project` whose files overlap with `files`. Each
+/// foreign row carries its source project for the renderer to tag.
+/// The pending ask-back, calibration warning, and template sections
+/// always stay project-scoped — those signals don't generalise.
+pub async fn build_brief_scoped(
+    project: &str,
+    files: &[String],
+    task_type: Option<&str>,
+    domain: Option<&str>,
+    cross_project: bool,
 ) -> Result<Brief> {
     let pending_ask_back = match AskBackStore::open_default().await {
         Ok(s) => s.get_pending_for_project(project).await.ok().flatten(),
@@ -105,10 +123,24 @@ pub async fn build_brief(
         Vec::new()
     } else {
         match MistakeStore::open_default().await {
-            Ok(s) => s
-                .top_categories_for_files(project, files, BRIEF_TOP_CATEGORIES)
-                .await
-                .unwrap_or_default(),
+            Ok(s) => {
+                let mut current = s
+                    .top_categories_for_files(project, files, BRIEF_TOP_CATEGORIES)
+                    .await
+                    .unwrap_or_default();
+                if cross_project {
+                    let foreign = s
+                        .top_categories_for_files_cross_project(
+                            project,
+                            files,
+                            BRIEF_TOP_CATEGORIES,
+                        )
+                        .await
+                        .unwrap_or_default();
+                    current.extend(foreign);
+                }
+                current
+            }
             Err(_) => Vec::new(),
         }
     };
@@ -117,10 +149,20 @@ pub async fn build_brief(
         Vec::new()
     } else {
         match AsksStore::open_default().await {
-            Ok(s) => s
-                .triggers_for_files(project, files, BRIEF_TOP_ASKS)
-                .await
-                .unwrap_or_default(),
+            Ok(s) => {
+                let mut current = s
+                    .triggers_for_files(project, files, BRIEF_TOP_ASKS)
+                    .await
+                    .unwrap_or_default();
+                if cross_project {
+                    let foreign = s
+                        .triggers_for_files_cross_project(project, files, BRIEF_TOP_ASKS)
+                        .await
+                        .unwrap_or_default();
+                    current.extend(foreign);
+                }
+                current
+            }
             Err(_) => Vec::new(),
         }
     };
@@ -229,8 +271,12 @@ pub fn render_text(brief: &Brief) -> String {
     if !brief.top_correction_categories.is_empty() {
         out.push_str("⚠️  TOP CORRECTION CATEGORIES for these files\n");
         for c in &brief.top_correction_categories {
+            let project_tag = match &c.source_project {
+                Some(p) if p != &brief.project => format!("[from {p}] "),
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "  - {category} ({count}×, last {last})\n",
+                "  - {project_tag}{category} ({count}×, last {last})\n",
                 category = c.category,
                 count = c.count,
                 last = c.last_seen.format("%Y-%m-%d"),
@@ -242,8 +288,13 @@ pub fn render_text(brief: &Brief) -> String {
     if !brief.should_have_asked_triggers.is_empty() {
         out.push_str("📌 SHOULD-HAVE-ASKED triggers for these files\n");
         for s in &brief.should_have_asked_triggers {
+            let project_tag = if s.project != brief.project {
+                format!("[from {}] ", s.project)
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  - [{trig}] {q}\n    → {a}\n",
+                "  - {project_tag}[{trig}] {q}\n    → {a}\n",
                 trig = s.trigger,
                 q = s.question,
                 a = truncate(&s.answer, 120),
@@ -377,11 +428,13 @@ mod tests {
                 category: "lifetime_annotations".into(),
                 count: 3,
                 last_seen: Utc::now(),
+                source_project: None,
             },
             CategoryCount {
                 category: "auth_order".into(),
                 count: 2,
                 last_seen: Utc::now(),
+                source_project: None,
             },
         ];
         let out = render_text(&b);
@@ -423,6 +476,60 @@ mod tests {
         assert!(out.contains("CALIBRATION"));
         assert!(out.contains("33% verified rate"));
         assert!(out.contains("12 declared successes"));
+    }
+
+    #[test]
+    fn render_text_tags_foreign_project_categories() {
+        let mut b = empty_brief();
+        b.top_correction_categories = vec![
+            CategoryCount {
+                category: "lifetime_annotations".into(),
+                count: 2,
+                last_seen: Utc::now(),
+                source_project: None, // current project
+            },
+            CategoryCount {
+                category: "auth_order".into(),
+                count: 3,
+                last_seen: Utc::now(),
+                source_project: Some("smelt".into()),
+            },
+        ];
+        let out = render_text(&b);
+        // Current-project row has no tag.
+        assert!(out.contains("- lifetime_annotations (2×"));
+        // Foreign-project row is prefixed.
+        assert!(out.contains("- [from smelt] auth_order (3×"));
+    }
+
+    #[test]
+    fn render_text_tags_foreign_project_asks() {
+        let mut b = empty_brief();
+        b.should_have_asked_triggers = vec![
+            ShouldHaveAsked {
+                id: Some(1),
+                project: "p".into(), // matches brief.project
+                trigger: "local_trig".into(),
+                question: "local Q?".into(),
+                answer: "local A".into(),
+                episode_id: None,
+                files: vec![],
+                created_at: Utc::now(),
+            },
+            ShouldHaveAsked {
+                id: Some(2),
+                project: "smelt".into(),
+                trigger: "foreign_trig".into(),
+                question: "foreign Q?".into(),
+                answer: "foreign A".into(),
+                episode_id: None,
+                files: vec![],
+                created_at: Utc::now(),
+            },
+        ];
+        let out = render_text(&b);
+        assert!(out.contains("- [local_trig] local Q?"));
+        assert!(out.contains("- [from smelt] [foreign_trig] foreign Q?"));
     }
 
     #[test]

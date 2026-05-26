@@ -236,6 +236,26 @@ impl AsksStore {
         Ok(out)
     }
 
+    /// Cross-project file-aware lookup (v0.10.2): rows from projects
+    /// OTHER than `current_project` whose files overlap. Each row
+    /// carries its own `project` field so the renderer can tag
+    /// foreign-project entries without needing extra metadata.
+    pub async fn triggers_for_files_cross_project(
+        &self,
+        current_project: &str,
+        target_files: &[String],
+        limit: i64,
+    ) -> Result<Vec<ShouldHaveAsked>> {
+        let recent = self.list(None, None, 1000).await?;
+        let mut out: Vec<ShouldHaveAsked> = recent
+            .into_iter()
+            .filter(|r| r.project != current_project)
+            .filter(|r| crate::mistakes::files_overlap(target_files, &r.files))
+            .collect();
+        out.truncate(limit as usize);
+        Ok(out)
+    }
+
     fn row_to_sha(row: &sqlx::sqlite::SqliteRow) -> Result<ShouldHaveAsked> {
         let files_json: String = row.get("files");
         let ts: i64 = row.get("created_at");
@@ -359,6 +379,43 @@ mod tests {
 
         let global = s.top_triggers(None, 10).await.unwrap();
         assert_eq!(global[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn triggers_for_files_cross_project_excludes_current() {
+        let s = AsksStore::open_in_memory().await.unwrap();
+        let mk_with = |project: &str, trig: &str, files: Vec<&str>| ShouldHaveAsked {
+            id: None,
+            project: project.into(),
+            trigger: trig.into(),
+            question: format!("Q from {project}"),
+            answer: "a".into(),
+            episode_id: None,
+            files: files.into_iter().map(String::from).collect(),
+            created_at: Utc::now(),
+        };
+        s.record(&mk_with("tempera", "edit_auth", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("smelt", "edit_auth", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with(
+            "smelt",
+            "sqlx_migration",
+            vec!["migrations/0001.sql"],
+        ))
+        .await
+        .unwrap();
+
+        let targets = vec!["src/auth.rs".to_string()];
+        let cp = s
+            .triggers_for_files_cross_project("tempera", &targets, 10)
+            .await
+            .unwrap();
+        assert_eq!(cp.len(), 1);
+        assert_eq!(cp[0].project, "smelt");
+        assert_eq!(cp[0].question, "Q from smelt");
     }
 
     #[tokio::test]

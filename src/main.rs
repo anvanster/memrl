@@ -438,6 +438,14 @@ enum Commands {
         /// Emit the structured Brief as JSON instead of formatted text.
         #[arg(long)]
         json: bool,
+
+        /// Include cross-project rows in the mistakes + should-have-asked
+        /// sections (v0.10.2). Foreign-project rows are tagged
+        /// `[from <project>]` so the boundary is visible. Pending
+        /// ask-back, calibration, and template sections stay project-
+        /// scoped — those signals don't generalise.
+        #[arg(long)]
+        cross_project: bool,
     },
 
     /// Show the pending ask-back for a project, if any, and mark it
@@ -1233,6 +1241,7 @@ async fn main() -> Result<()> {
             domain,
             project,
             json,
+            cross_project,
         } => {
             let project = project.unwrap_or_else(|| {
                 std::env::current_dir()
@@ -1245,11 +1254,12 @@ async fn main() -> Result<()> {
                 .map(|f| f.trim().to_string())
                 .filter(|f| !f.is_empty())
                 .collect();
-            let b = brief::build_brief(
+            let b = brief::build_brief_scoped(
                 &project,
                 &files_vec,
                 task_type.as_deref(),
                 domain.as_deref(),
+                cross_project,
             )
             .await?;
             if json {

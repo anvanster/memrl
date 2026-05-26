@@ -40,6 +40,14 @@ pub struct CategoryCount {
     pub category: String,
     pub count: i64,
     pub last_seen: DateTime<Utc>,
+    /// Source project when the row came from a cross-project query
+    /// (v0.10.2). `None` for the current-project aggregations the
+    /// brief produces by default — `top_categories` and the
+    /// project-scoped `top_categories_for_files` leave this empty so
+    /// the JSON shape stays backwards compatible. The cross-project
+    /// helper populates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_project: Option<String>,
 }
 
 #[derive(Clone)]
@@ -205,6 +213,7 @@ impl MistakeStore {
                     category: r.get("category"),
                     count: r.get("n"),
                     last_seen: DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_default(),
+                    source_project: None,
                 })
             })
             .collect()
@@ -243,6 +252,53 @@ impl MistakeStore {
                 category,
                 count,
                 last_seen,
+                source_project: None,
+            })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
+        out.truncate(n as usize);
+        Ok(out)
+    }
+
+    /// Cross-project file-aware top-N (v0.10.2): aggregate categories
+    /// from projects OTHER than `current_project` whose files overlap
+    /// with `target_files`. Each result is tagged with its source
+    /// project, so the brief renderer can label foreign-project rows
+    /// for the agent's calibration. Aggregation is per `(project,
+    /// category)` so the same category appearing in three projects
+    /// surfaces three rows (one per project) rather than a misleading
+    /// merged count.
+    pub async fn top_categories_for_files_cross_project(
+        &self,
+        current_project: &str,
+        target_files: &[String],
+        n: i64,
+    ) -> Result<Vec<CategoryCount>> {
+        // No project filter — pull across the whole index.
+        let recent = self.list(None, None, 1000).await?;
+        let mut map: std::collections::HashMap<(String, String), (i64, DateTime<Utc>)> =
+            std::collections::HashMap::new();
+        for m in &recent {
+            if m.project == current_project {
+                continue;
+            }
+            if !files_overlap(target_files, &m.files) {
+                continue;
+            }
+            let key = (m.project.clone(), m.category.clone());
+            let e = map.entry(key).or_insert((0, m.created_at));
+            e.0 += 1;
+            if m.created_at > e.1 {
+                e.1 = m.created_at;
+            }
+        }
+        let mut out: Vec<CategoryCount> = map
+            .into_iter()
+            .map(|((project, category), (count, last_seen))| CategoryCount {
+                category,
+                count,
+                last_seen,
+                source_project: Some(project),
             })
             .collect();
         out.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
@@ -365,6 +421,85 @@ mod tests {
         let target = vec!["src/foo.rs".to_string()];
         let row: Vec<String> = vec![];
         assert!(!files_overlap(&target, &row));
+    }
+
+    #[tokio::test]
+    async fn top_categories_for_files_cross_project_excludes_current() {
+        let s = MistakeStore::open_in_memory().await.unwrap();
+        let mk_with = |project: &str, cat: &str, files: Vec<&str>| Mistake {
+            id: None,
+            project: project.into(),
+            category: cat.into(),
+            episode_id: None,
+            files: files.into_iter().map(String::from).collect(),
+            description: "d".into(),
+            correction: "c".into(),
+            created_at: Utc::now(),
+        };
+        // Two projects, both touching src/auth.rs.
+        s.record(&mk_with("tempera", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("smelt", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("smelt", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("codegraph", "type_inference", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+
+        let targets = vec!["src/auth.rs".to_string()];
+        let cp = s
+            .top_categories_for_files_cross_project("tempera", &targets, 10)
+            .await
+            .unwrap();
+        // Current project (tempera) excluded; smelt (count=2) + codegraph (count=1) remain.
+        assert_eq!(cp.len(), 2);
+        assert_eq!(cp[0].source_project, Some("smelt".into()));
+        assert_eq!(cp[0].count, 2);
+        assert_eq!(cp[1].source_project, Some("codegraph".into()));
+    }
+
+    #[tokio::test]
+    async fn top_categories_for_files_cross_project_one_row_per_project_category() {
+        let s = MistakeStore::open_in_memory().await.unwrap();
+        let mk_with = |project: &str, cat: &str, files: Vec<&str>| Mistake {
+            id: None,
+            project: project.into(),
+            category: cat.into(),
+            episode_id: None,
+            files: files.into_iter().map(String::from).collect(),
+            description: "d".into(),
+            correction: "c".into(),
+            created_at: Utc::now(),
+        };
+        // Same category in two foreign projects — must surface as TWO
+        // rows (not merged), so the agent sees provenance.
+        s.record(&mk_with("smelt", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("smelt", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with("codegraph", "auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+
+        let targets = vec!["src/auth.rs".to_string()];
+        let cp = s
+            .top_categories_for_files_cross_project("tempera", &targets, 10)
+            .await
+            .unwrap();
+        assert_eq!(cp.len(), 2);
+        // Both rows have category=auth_order; tagged with distinct sources.
+        let projects: std::collections::HashSet<&str> = cp
+            .iter()
+            .map(|c| c.source_project.as_deref().unwrap_or(""))
+            .collect();
+        assert!(projects.contains("smelt"));
+        assert!(projects.contains("codegraph"));
     }
 
     #[tokio::test]
