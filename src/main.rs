@@ -14,6 +14,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
+mod asks;
 mod backup;
 mod calibration;
 mod capture;
@@ -396,6 +397,55 @@ enum Commands {
         project: Option<String>,
 
         /// Emit buckets as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Log a question you should have asked up front but didn't, and
+    /// the answer you eventually got (v0.8.4). Mirrors the
+    /// `tempera_log_should_have_asked` MCP tool for humans who realize
+    /// the gap offline.
+    LogShouldHaveAsked {
+        /// Observable context label (normalized to snake_case).
+        #[arg(long)]
+        trigger: String,
+
+        /// The question you should have asked.
+        #[arg(long)]
+        question: String,
+
+        /// The answer that turned out to be true.
+        #[arg(long)]
+        answer: String,
+
+        /// Optional episode id (full or 8-char prefix).
+        #[arg(long)]
+        episode: Option<String>,
+
+        /// Comma-separated list of files involved.
+        #[arg(long)]
+        files: Option<String>,
+
+        /// Override project name (default: auto-detect from CWD).
+        #[arg(long)]
+        project: Option<String>,
+    },
+
+    /// View the should-have-asked log. Filter by project/trigger, or
+    /// `--top` for most-frequent triggers.
+    Asks {
+        #[arg(long)]
+        project: Option<String>,
+
+        #[arg(long)]
+        trigger: Option<String>,
+
+        #[arg(long)]
+        top: Option<i64>,
+
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+
         #[arg(long)]
         json: bool,
     },
@@ -1100,6 +1150,127 @@ async fn main() -> Result<()> {
                         println!("    right:    {}", m.correction);
                         if !m.files.is_empty() {
                             println!("    files:    {}", m.files.join(", ").dimmed());
+                        }
+                    }
+                    println!();
+                }
+            }
+        }
+
+        Commands::LogShouldHaveAsked {
+            trigger,
+            question,
+            answer,
+            episode,
+            files,
+            project,
+        } => {
+            let project = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+            let files_vec: Vec<String> = files
+                .map(|s| s.split(',').map(|f| f.trim().to_string()).collect())
+                .unwrap_or_default();
+            let trigger_norm = asks::normalize_trigger(&trigger);
+            if trigger_norm.is_empty() {
+                anyhow::bail!("--trigger cannot be empty after normalization");
+            }
+            let episode_id = if let Some(id) = episode {
+                let s = store::EpisodeStore::new()?;
+                s.load(&id).ok().map(|ep| ep.id).or(Some(id))
+            } else {
+                None
+            };
+            let sha = asks::ShouldHaveAsked {
+                id: None,
+                project: project.clone(),
+                trigger: trigger_norm.clone(),
+                question,
+                answer,
+                episode_id,
+                files: files_vec,
+                created_at: chrono::Utc::now(),
+            };
+            let store = asks::AsksStore::open_default().await?;
+            let id = store.record(&sha).await?;
+            println!("Logged should-have-asked #{id} in [{project}] / trigger {trigger_norm}");
+        }
+
+        Commands::Asks {
+            project,
+            trigger,
+            top,
+            limit,
+            json,
+        } => {
+            let store = asks::AsksStore::open_default().await?;
+            if let Some(n) = top {
+                let trigs = store.top_triggers(project.as_deref(), n).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&trigs)?);
+                } else if trigs.is_empty() {
+                    println!("No should-have-asked entries yet.");
+                } else {
+                    use colored::Colorize;
+                    println!();
+                    println!(
+                        "{} (top {})",
+                        "Top should-have-asked triggers".bold(),
+                        trigs.len()
+                    );
+                    for t in &trigs {
+                        let last = t.last_seen.format("%Y-%m-%d").to_string();
+                        let count_str = format!("{}×", t.count);
+                        let count_colored = if t.count >= 5 {
+                            count_str.red()
+                        } else if t.count >= 3 {
+                            count_str.yellow()
+                        } else {
+                            count_str.normal()
+                        };
+                        println!("  {:<6} {:<30} (last: {})", count_colored, t.trigger, last);
+                    }
+                    println!();
+                }
+            } else {
+                let rows = store
+                    .list(project.as_deref(), trigger.as_deref(), limit)
+                    .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else if rows.is_empty() {
+                    println!("No should-have-asked entries match those filters.");
+                } else {
+                    use colored::Colorize;
+                    println!();
+                    println!(
+                        "{} ({} row{})",
+                        "Should-have-asked log".bold(),
+                        rows.len(),
+                        if rows.len() == 1 { "" } else { "s" }
+                    );
+                    for sha in &rows {
+                        let when = sha.created_at.format("%Y-%m-%d %H:%M").to_string();
+                        let trig_colored = sha.trigger.cyan();
+                        let id8 = sha
+                            .episode_id
+                            .as_deref()
+                            .map(|s| &s[..8.min(s.len())])
+                            .unwrap_or("--------");
+                        println!(
+                            "  [{}] {} {} {}",
+                            trig_colored,
+                            sha.project.dimmed(),
+                            id8.dimmed(),
+                            when.dimmed()
+                        );
+                        println!("    Q: {}", sha.question);
+                        println!("    A: {}", sha.answer);
+                        if !sha.files.is_empty() {
+                            println!("    files: {}", sha.files.join(", ").dimmed());
                         }
                     }
                     println!();

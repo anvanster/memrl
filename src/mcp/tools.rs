@@ -256,6 +256,41 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "tempera_log_should_have_asked".to_string(),
+            description: "Log a question you SHOULD have asked the user up front but didn't — and the answer you eventually figured out (often by being told). Call this when, mid-task or after, you realize you assumed something the user could have clarified in one turn. Examples: 'should have asked which auth provider this repo uses before writing the middleware', 'should have asked whether feature flags should default-on'. The `trigger` is the observable context that should fire the question NEXT time — kebab/snake_case like 'edit-auth-middleware', 'new-rust-crate'. The future `tempera_brief` surfaces top triggers when the agent is about to touch a matching file/topic, so logging consistently teaches future-you what to ask before guessing. DO log: ambiguity that wasted a turn, decisions you made and had to undo, assumptions that turned out wrong. DON'T log: questions whose answers are documented in the repo, or one-off project quirks unlikely to recur.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "trigger": {
+                        "type": "string",
+                        "description": "Observable context label that should make future-you ask the question. E.g. 'edit-auth-middleware', 'new-rust-crate', 'sqlx-migration'. Normalized to lowercase snake_case on save."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "What you should have asked up front. Phrase as the question itself, not 'I should have asked X' — e.g. 'Which auth provider is wired up?'"
+                    },
+                    "answer": {
+                        "type": "string",
+                        "description": "What turned out to be true (often what the user told you when you finally asked). Doubles as fallback knowledge: if asking would be disruptive next time, the prior answer is still a better default than guessing."
+                    },
+                    "episode_id": {
+                        "type": "string",
+                        "description": "Optional: the episode this realization happened during (full or 8-char prefix)."
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Files involved — populates the future per-file brief surface."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Override project name (default: auto-detect from working directory)."
+                    }
+                },
+                "required": ["trigger", "question", "answer"]
+            }),
+        },
+        Tool {
             name: "tempera_template".to_string(),
             description: "Pull the reasoning template that worked for a (task_type, domain) pair the last time tempera observed several successful episodes there. Call this at task start, BEFORE you start exploring or editing, when the kind of task is clear — e.g. (bugfix, async-rust), (refactor, sqlx-migrations), (feature, mcp-handlers). The response is an ordered list of steps the agent has historically followed when this kind of task succeeded; treat them as a starting checklist, not a rigid script. If no template exists yet for the pair, fall back to tempera_retrieve. Templates accrue during the dream cycle — they get better with use, so missing template = early days, not an error.".to_string(),
             input_schema: json!({
