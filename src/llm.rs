@@ -158,6 +158,23 @@ Respond with a JSON object containing:
 - claim_category: one of
     api_contract | performance | structural | conventional |
     workaround | logistics | other
+- validity_scope: one of these colon-encoded strings — pick the MOST SPECIFIC
+  scope that the central insight is actually true within:
+    "forever"                — mathematical or universal truth
+                               (e.g. "BFS visits nodes in layers")
+    "language:<lang>"        — true at the language level
+                               (e.g. "language:rust" for borrow-checker facts)
+    "crate:<name>@<version>" — true for a specific library version
+                               (e.g. "crate:sqlx@0.8", "crate:tokio")
+                               Omit @version for "any version".
+    "domain:<tag>"           — true within a problem domain
+                               (e.g. "domain:async-rust", "domain:auth-middleware")
+    "workaround:<ref>"       — bug-specific, expires when the issue closes
+                               (e.g. "workaround:rust-lang/cargo#12345")
+    "project"                — bound to THIS codebase only (project conventions,
+                               internal APIs, naming choices). Pick this when in
+                               doubt — it's the safe default that won't bleed
+                               into cross-project retrieval.
 
 Respond ONLY with valid JSON, no other text."#;
 
@@ -249,6 +266,18 @@ Respond with a JSON object containing:
 - claim_category: one of
     api_contract | performance | structural | conventional |
     workaround | logistics | other
+- validity_scope: one of these colon-encoded strings — pick the MOST SPECIFIC
+  scope that the central insight is actually true within:
+    "forever"                — mathematical or universal truth
+    "language:<lang>"        — true at the language level (e.g. "language:rust")
+    "crate:<name>@<version>" — true for a specific library version
+                               (omit @version for "any version")
+    "domain:<tag>"           — true within a problem domain
+                               (e.g. "domain:async-rust", "domain:auth-middleware")
+    "workaround:<ref>"       — bug-specific, expires when the referenced issue closes
+    "project"                — bound to THIS codebase only. Pick this when in
+                               doubt — it's the safe default that won't bleed
+                               into cross-project retrieval.
 
 Respond ONLY with valid JSON, no other text."#;
 
@@ -410,9 +439,78 @@ fn parse_claim_category(s: &str) -> ClaimCategory {
     }
 }
 
+/// Parse the LLM-supplied `validity_scope` string into a `ValidityScope`
+/// (v0.10.3). The colon-encoded format mirrors what the prompt asks for:
+///
+///   "forever"                → ValidityScope::Forever
+///   "language:rust"          → Language { name: "rust" }
+///   "crate:sqlx@0.8"         → Crate { name: "sqlx", version: "0.8" }
+///   "crate:tokio"            → Crate { name: "tokio", version: "" }
+///   "domain:async-rust"      → Domain { tag: "async-rust" }
+///   "workaround:foo#123"     → Workaround { ref_: "foo#123", expires: None }
+///   "project"                → Project { name: "" }     (caller fills name)
+///
+/// Returns `None` on unrecognised input — the rest of the Claim still
+/// loads. The `Project { name: "" }` placeholder is a contract with the
+/// caller: capture.rs patches the empty name with the episode's actual
+/// project so llm.rs stays project-agnostic.
+pub(crate) fn parse_validity_scope(s: &str) -> Option<crate::episode::ValidityScope> {
+    use crate::episode::ValidityScope;
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.eq_ignore_ascii_case("forever") {
+        return Some(ValidityScope::Forever);
+    }
+    if s.eq_ignore_ascii_case("project") {
+        return Some(ValidityScope::Project {
+            name: String::new(),
+        });
+    }
+    let (kind, value) = s.split_once(':')?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    match kind.trim().to_lowercase().as_str() {
+        "language" => Some(ValidityScope::Language {
+            name: value.to_string(),
+        }),
+        "crate" => {
+            // Optional @version after the name.
+            let (name, version) = match value.split_once('@') {
+                Some((n, v)) => (n.trim().to_string(), v.trim().to_string()),
+                None => (value.to_string(), String::new()),
+            };
+            if name.is_empty() {
+                return None;
+            }
+            Some(ValidityScope::Crate { name, version })
+        }
+        "domain" => Some(ValidityScope::Domain {
+            tag: value.to_string(),
+        }),
+        "workaround" => Some(ValidityScope::Workaround {
+            ref_: value.to_string(),
+            expires: None,
+        }),
+        "project" => Some(ValidityScope::Project {
+            name: value.to_string(),
+        }),
+        _ => None,
+    }
+}
+
 /// Extract `claim` from the JSON response. Returns `None` when the LLM
 /// didn't produce either field (older deployments, partial outputs) — the
 /// rest of `ExtractedIntent` still loads.
+///
+/// As of v0.10.3 the LLM is also asked to suggest a `validity_scope`.
+/// When the model emits a recognisable colon-string, it gets parsed
+/// here; if the value is a `Project { name: "" }` placeholder the
+/// caller (capture.rs) is responsible for filling in the project
+/// name before the Claim is persisted.
 fn parse_claim(parsed: &serde_json::Value) -> Option<Claim> {
     let falsifiability = parsed.get("falsifiability").and_then(|v| v.as_f64())?;
     let category = parsed
@@ -420,13 +518,14 @@ fn parse_claim(parsed: &serde_json::Value) -> Option<Claim> {
         .and_then(|v| v.as_str())
         .map(parse_claim_category)
         .unwrap_or(ClaimCategory::Other);
+    let validity_scope = parsed
+        .get("validity_scope")
+        .and_then(|v| v.as_str())
+        .and_then(parse_validity_scope);
     Some(Claim {
         falsifiability: (falsifiability as f32).clamp(0.0, 1.0),
         category,
-        // The LLM doesn't infer scope at capture time — the agent supplies
-        // it via the MCP `validity_scope` parameter when it has a good
-        // reason to pin one. Default None means "legacy 1%/day decay".
-        validity_scope: None,
+        validity_scope,
     })
 }
 
@@ -447,5 +546,122 @@ mod tests {
         assert_eq!(parse_outcome("success"), OutcomeStatus::Success);
         assert_eq!(parse_outcome("partial"), OutcomeStatus::Partial);
         assert_eq!(parse_outcome("failure"), OutcomeStatus::Failure);
+    }
+
+    #[test]
+    fn parse_validity_scope_forever() {
+        use crate::episode::ValidityScope;
+        assert!(matches!(
+            parse_validity_scope("forever"),
+            Some(ValidityScope::Forever)
+        ));
+        assert!(matches!(
+            parse_validity_scope("FOREVER"),
+            Some(ValidityScope::Forever)
+        ));
+    }
+
+    #[test]
+    fn parse_validity_scope_language() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("language:rust").unwrap();
+        match s {
+            ValidityScope::Language { name } => assert_eq!(name, "rust"),
+            _ => panic!("expected Language"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_crate_with_version() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("crate:sqlx@0.8").unwrap();
+        match s {
+            ValidityScope::Crate { name, version } => {
+                assert_eq!(name, "sqlx");
+                assert_eq!(version, "0.8");
+            }
+            _ => panic!("expected Crate"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_crate_without_version() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("crate:tokio").unwrap();
+        match s {
+            ValidityScope::Crate { name, version } => {
+                assert_eq!(name, "tokio");
+                assert_eq!(version, "");
+            }
+            _ => panic!("expected Crate"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_domain() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("domain:async-rust").unwrap();
+        match s {
+            ValidityScope::Domain { tag } => assert_eq!(tag, "async-rust"),
+            _ => panic!("expected Domain"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_workaround() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("workaround:rust-lang/cargo#12345").unwrap();
+        match s {
+            ValidityScope::Workaround { ref_, expires } => {
+                assert_eq!(ref_, "rust-lang/cargo#12345");
+                assert!(expires.is_none());
+            }
+            _ => panic!("expected Workaround"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_project_uses_placeholder() {
+        use crate::episode::ValidityScope;
+        let s = parse_validity_scope("project").unwrap();
+        match s {
+            ValidityScope::Project { name } => assert_eq!(name, ""),
+            _ => panic!("expected Project"),
+        }
+    }
+
+    #[test]
+    fn parse_validity_scope_malformed_returns_none() {
+        assert!(parse_validity_scope("").is_none());
+        assert!(parse_validity_scope("bogus").is_none());
+        assert!(parse_validity_scope("language:").is_none());
+        assert!(parse_validity_scope("crate:").is_none());
+        assert!(parse_validity_scope("crate:@1.0").is_none());
+    }
+
+    #[test]
+    fn parse_claim_picks_up_validity_scope() {
+        use crate::episode::ValidityScope;
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{ "falsifiability": 0.8, "claim_category": "api_contract",
+                 "validity_scope": "language:rust" }"#,
+        )
+        .unwrap();
+        let claim = parse_claim(&json).unwrap();
+        match claim.validity_scope {
+            Some(ValidityScope::Language { name }) => assert_eq!(name, "rust"),
+            other => panic!("expected Language, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_claim_without_validity_scope_field() {
+        // Legacy LLM output (no validity_scope field) — claim still loads,
+        // scope stays None.
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{ "falsifiability": 0.8, "claim_category": "api_contract" }"#)
+                .unwrap();
+        let claim = parse_claim(&json).unwrap();
+        assert!(claim.validity_scope.is_none());
     }
 }

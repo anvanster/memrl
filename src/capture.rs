@@ -330,7 +330,20 @@ async fn apply_intent_extraction(
                 episode.intent.task_type = analysis.task_type;
                 episode.intent.domain = analysis.tags;
                 // v0.6.2: piggyback the falsifiability assessment.
-                episode.intent.claim = analysis.claim;
+                // v0.10.3: if the LLM emitted a Project-scoped claim
+                // with an empty name (the project-agnostic placeholder
+                // from `parse_validity_scope`), patch the episode's
+                // actual project in here so cross-project routing has
+                // a usable scope.
+                episode.intent.claim = analysis.claim.map(|mut c| {
+                    if let Some(crate::episode::ValidityScope::Project { name }) =
+                        c.validity_scope.as_mut()
+                        && name.is_empty()
+                    {
+                        *name = episode.project.clone();
+                    }
+                    c
+                });
                 if !analysis.files_modified.is_empty() {
                     episode
                         .context
