@@ -291,6 +291,33 @@ pub(crate) fn tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "tempera_brief".to_string(),
+            description: "One-call summary of everything tempera has learned about the exact patch of code you're about to touch. Joins your working set against five v0.8 surfaces: pending ask-backs (questions to ask the user first), reasoning templates (the step sequence past wins followed), top correction categories for these files (where you've been wrong here before), should-have-asked triggers (questions to ask up front in this kind of context), and calibration warnings (your verified vs declared success rate for this task_type/project). Call this AT TASK START once you know the files; pass task_type + domain too for the template section to fire. Sections are omitted from the response when empty, so a short response means tempera has nothing specific to surface — fall back to tempera_retrieve in that case. Pairs with tempera_session_start as the standard warmup duo.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Files the agent is about to edit / read / consider. Used to join against mistakes + should-have-asked. Empty list means no file-scoped sections fire."
+                    },
+                    "task_type": {
+                        "type": "string",
+                        "description": "Optional: bugfix | feature | refactor | test | docs | research | debug | setup. Enables the calibration warning + template lookup."
+                    },
+                    "domain": {
+                        "type": "string",
+                        "description": "Optional: domain tag, e.g. 'rust', 'async-rust', 'sqlx'. Combined with task_type to pull a reasoning template if one exists."
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Project name (default: auto-detect from working directory)."
+                    }
+                },
+                "required": ["files"]
+            }),
+        },
+        Tool {
             name: "tempera_session_start".to_string(),
             description: "Call this ONCE at the very start of a session in a project — before you start exploring, reading files, or planning. If tempera previously observed an episode in this project end in failure/partial with vague intent, it drafted ONE clarifying question via Haiku. This tool returns that question so you can ask the user before guessing the same way again. If there's no pending question the response says so and you can proceed normally. Calling this is cheap (one DB lookup) and the question gets marked 'served' so it won't surface again. Best-paired with tempera_template and tempera_retrieve as the standard session-warmup trio.".to_string(),
             input_schema: json!({

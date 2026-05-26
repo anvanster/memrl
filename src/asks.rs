@@ -216,6 +216,26 @@ impl AsksStore {
             .collect()
     }
 
+    /// File-aware lookup for the v0.9 brief. Loads recent rows for the
+    /// project and keeps only those whose files overlap with
+    /// `target_files` (same basename rules as `mistakes::files_overlap`).
+    /// Returns the rows directly — each trigger may have a different
+    /// question, so aggregating by trigger here would hide signal.
+    pub async fn triggers_for_files(
+        &self,
+        project: &str,
+        target_files: &[String],
+        limit: i64,
+    ) -> Result<Vec<ShouldHaveAsked>> {
+        let recent = self.list(Some(project), None, 500).await?;
+        let mut out: Vec<ShouldHaveAsked> = recent
+            .into_iter()
+            .filter(|r| crate::mistakes::files_overlap(target_files, &r.files))
+            .collect();
+        out.truncate(limit as usize);
+        Ok(out)
+    }
+
     fn row_to_sha(row: &sqlx::sqlite::SqliteRow) -> Result<ShouldHaveAsked> {
         let files_json: String = row.get("files");
         let ts: i64 = row.get("created_at");
@@ -339,6 +359,44 @@ mod tests {
 
         let global = s.top_triggers(None, 10).await.unwrap();
         assert_eq!(global[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn triggers_for_files_filters_by_overlap() {
+        let s = AsksStore::open_in_memory().await.unwrap();
+        let mk_with_files = |trig: &str, q: &str, files: Vec<&str>| ShouldHaveAsked {
+            id: None,
+            project: "p".into(),
+            trigger: trig.into(),
+            question: q.into(),
+            answer: "a".into(),
+            episode_id: None,
+            files: files.into_iter().map(String::from).collect(),
+            created_at: Utc::now(),
+        };
+        s.record(&mk_with_files("edit_auth", "Q1", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with_files("new_crate", "Q2", vec!["Cargo.toml"]))
+            .await
+            .unwrap();
+        s.record(&mk_with_files(
+            "sqlx_mig",
+            "Q3",
+            vec!["migrations/0001.sql"],
+        ))
+        .await
+        .unwrap();
+
+        let targets = vec!["src/auth.rs".into()];
+        let rows = s.triggers_for_files("p", &targets, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].trigger, "edit_auth");
+        assert_eq!(rows[0].question, "Q1");
+
+        let targets = vec!["Cargo.toml".into(), "migrations/0001.sql".into()];
+        let rows = s.triggers_for_files("p", &targets, 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
     }
 
     #[tokio::test]

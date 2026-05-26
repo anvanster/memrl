@@ -1,6 +1,7 @@
 // Copyright 2024-2026 Andrey Vasilevsky <anvanster@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod brief;
 pub(crate) mod capture;
 pub(crate) mod feedback;
 pub(crate) mod log_correction;

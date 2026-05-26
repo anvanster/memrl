@@ -210,6 +210,46 @@ impl MistakeStore {
             .collect()
     }
 
+    /// File-aware top-N categories: load recent rows for the project,
+    /// keep only those whose files overlap with `target_files` (basename
+    /// match in either direction so `src/foo.rs` matches `foo.rs`), and
+    /// aggregate by category. Lives here rather than in SQL because the
+    /// JSON1 file extraction path is awkward and we expect low-hundreds
+    /// of rows per project — fast enough to do in Rust.
+    pub async fn top_categories_for_files(
+        &self,
+        project: &str,
+        target_files: &[String],
+        n: i64,
+    ) -> Result<Vec<CategoryCount>> {
+        // Limit how far back we scan. 500 covers years of normal use;
+        // tune if a brief becomes slow.
+        let recent = self.list(Some(project), None, 500).await?;
+        let mut map: std::collections::HashMap<String, (i64, DateTime<Utc>)> =
+            std::collections::HashMap::new();
+        for m in &recent {
+            if !files_overlap(target_files, &m.files) {
+                continue;
+            }
+            let e = map.entry(m.category.clone()).or_insert((0, m.created_at));
+            e.0 += 1;
+            if m.created_at > e.1 {
+                e.1 = m.created_at;
+            }
+        }
+        let mut out: Vec<CategoryCount> = map
+            .into_iter()
+            .map(|(category, (count, last_seen))| CategoryCount {
+                category,
+                count,
+                last_seen,
+            })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_seen.cmp(&a.last_seen)));
+        out.truncate(n as usize);
+        Ok(out)
+    }
+
     fn row_to_mistake(row: &sqlx::sqlite::SqliteRow) -> Result<Mistake> {
         let ts: i64 = row.get("created_at");
         let files_json: String = row.get("files");
@@ -224,6 +264,35 @@ impl MistakeStore {
             created_at: DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or_default(),
         })
     }
+}
+
+/// File-overlap predicate used by the v0.9 brief surface. Two file
+/// lists overlap if either:
+///   - exact path match (`src/foo.rs` == `src/foo.rs`)
+///   - basename match (`tempera/src/foo.rs` and `foo.rs`)
+///
+/// Path prefix / suffix matching keeps the surface useful even when
+/// stored captures used different working-directory roots from the
+/// agent's current working set. Empty `target_files` matches nothing.
+pub fn files_overlap(target_files: &[String], row_files: &[String]) -> bool {
+    if target_files.is_empty() || row_files.is_empty() {
+        return false;
+    }
+    fn basename(p: &str) -> &str {
+        p.rsplit(['/', '\\']).next().unwrap_or(p)
+    }
+    for t in target_files {
+        let tb = basename(t);
+        for r in row_files {
+            if t == r {
+                return true;
+            }
+            if tb == basename(r) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Normalize a free-form category string. Lowercase, replace spaces +
@@ -261,6 +330,85 @@ mod tests {
             correction: "do it differently".into(),
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn files_overlap_exact_path() {
+        let target = vec!["src/foo.rs".to_string()];
+        let row = vec!["src/foo.rs".to_string()];
+        assert!(files_overlap(&target, &row));
+    }
+
+    #[test]
+    fn files_overlap_basename_match() {
+        let target = vec!["tempera/src/foo.rs".to_string()];
+        let row = vec!["foo.rs".to_string()];
+        assert!(files_overlap(&target, &row));
+        // Reverse direction
+        let target = vec!["foo.rs".to_string()];
+        let row = vec!["other/repo/src/foo.rs".to_string()];
+        assert!(files_overlap(&target, &row));
+    }
+
+    #[test]
+    fn files_overlap_no_match() {
+        let target = vec!["src/foo.rs".to_string()];
+        let row = vec!["src/bar.rs".to_string(), "src/baz.rs".to_string()];
+        assert!(!files_overlap(&target, &row));
+    }
+
+    #[test]
+    fn files_overlap_empty_lists() {
+        let target: Vec<String> = vec![];
+        let row = vec!["src/foo.rs".to_string()];
+        assert!(!files_overlap(&target, &row));
+        let target = vec!["src/foo.rs".to_string()];
+        let row: Vec<String> = vec![];
+        assert!(!files_overlap(&target, &row));
+    }
+
+    #[tokio::test]
+    async fn top_categories_for_files_filters_by_overlap() {
+        let s = MistakeStore::open_in_memory().await.unwrap();
+        let mk_with_files = |cat: &str, files: Vec<&str>| Mistake {
+            id: None,
+            project: "p".into(),
+            category: cat.into(),
+            episode_id: None,
+            files: files.into_iter().map(String::from).collect(),
+            description: "d".into(),
+            correction: "c".into(),
+            created_at: Utc::now(),
+        };
+        s.record(&mk_with_files("auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with_files("auth_order", vec!["src/auth.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with_files("type_inference", vec!["src/foo.rs"]))
+            .await
+            .unwrap();
+        s.record(&mk_with_files("type_inference", vec!["src/types.rs"]))
+            .await
+            .unwrap();
+
+        // Only auth.rs in the working set: should see auth_order=2 only.
+        let targets = vec!["src/auth.rs".to_string()];
+        let top = s.top_categories_for_files("p", &targets, 10).await.unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].category, "auth_order");
+        assert_eq!(top[0].count, 2);
+
+        // Both files: both categories.
+        let targets = vec!["src/auth.rs".to_string(), "src/foo.rs".to_string()];
+        let top = s.top_categories_for_files("p", &targets, 10).await.unwrap();
+        assert_eq!(top.len(), 2);
+        // auth_order has count 2; type_inference has count 1 from foo.rs.
+        assert_eq!(top[0].category, "auth_order");
+        assert_eq!(top[0].count, 2);
+        assert_eq!(top[1].category, "type_inference");
+        assert_eq!(top[1].count, 1);
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod ask_back_gen;
 mod ask_backs;
 mod asks;
 mod backup;
+mod brief;
 mod calibration;
 mod capture;
 mod config;
@@ -399,6 +400,35 @@ enum Commands {
         project: Option<String>,
 
         /// Emit buckets as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// One-call summary joining the working set against every v0.8
+    /// surface — pending ask-backs, reasoning templates, top correction
+    /// categories for these files, should-have-asked triggers,
+    /// calibration warnings (v0.9).
+    Brief {
+        /// Comma-separated list of files about to be edited.
+        #[arg(long)]
+        files: String,
+
+        /// Optional task type: bugfix | feature | refactor | test |
+        /// docs | research | debug | setup. Required for the
+        /// calibration warning + template sections.
+        #[arg(long)]
+        task_type: Option<String>,
+
+        /// Optional domain tag, paired with task_type to look up a
+        /// reasoning template.
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Override project name (default: auto-detect from CWD).
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Emit the structured Brief as JSON instead of formatted text.
         #[arg(long)]
         json: bool,
     },
@@ -1181,6 +1211,38 @@ async fn main() -> Result<()> {
                     }
                     println!();
                 }
+            }
+        }
+
+        Commands::Brief {
+            files,
+            task_type,
+            domain,
+            project,
+            json,
+        } => {
+            let project = project.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            });
+            let files_vec: Vec<String> = files
+                .split(',')
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty())
+                .collect();
+            let b = brief::build_brief(
+                &project,
+                &files_vec,
+                task_type.as_deref(),
+                domain.as_deref(),
+            )
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&b)?);
+            } else {
+                print!("{}", brief::render_text(&b));
             }
         }
 

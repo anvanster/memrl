@@ -20,6 +20,7 @@ use std::io::{self, BufRead, Write};
 
 mod ask_backs;
 mod asks;
+mod brief;
 mod calibration;
 mod config;
 mod episode;
