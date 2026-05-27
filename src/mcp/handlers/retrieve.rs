@@ -186,6 +186,13 @@ pub(crate) async fn handle(args: &Value) -> Result<String, String> {
     // Record retrieval for tracking
     let _ = record_mcp_retrieval(&episodes, query, &store);
 
+    // v0.11: append structured recall attribution so downstream tools
+    // (codegraph, etc.) can programmatically detect whether memory
+    // contributed and thread it into their own responses.
+    let attr = retrieve::compute_recall_attribution(&episodes);
+    output.push('\n');
+    output.push_str(&retrieve::format_recall_attribution(&attr));
+
     Ok(output)
 }
 

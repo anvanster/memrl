@@ -679,6 +679,118 @@ pub struct ScoredEpisode {
     pub combined_score: f32,
 }
 
+// ===== Recall attribution (v0.11) =====
+
+/// Structured metadata appended to `tempera_retrieve` MCP responses so
+/// downstream tools (codegraph, etc.) can tell *programmatically*
+/// whether memory contributed to a result and thread
+/// `"recall_used": true` into their own outputs.
+///
+/// Emitted as the last line of the text response:
+///
+/// ```text
+/// recall_attribution: {"v":1,"available":true,...}
+/// ```
+///
+/// Consumers scan for the `recall_attribution: ` prefix and parse the
+/// rest as JSON. The schema is versioned (`v: 1`) so future additions
+/// are non-breaking.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecallAttribution {
+    /// Schema version. Always 1 for now.
+    pub v: u32,
+    /// True if at least one episode matched above the recall threshold.
+    pub available: bool,
+    /// Highest `combined_score` in the result set. 0.0 when empty.
+    pub top_score: f32,
+    /// Confidence tier derived from score + verification state.
+    pub confidence: RecallConfidence,
+    /// One-line summary of the top-scoring episode's intent.
+    pub top_summary: String,
+    /// 8-char episode ID of the top result (for drilldown via
+    /// `tempera_retrieve(query: "<id>")`).
+    pub top_episode: String,
+    /// Days since the top result was captured.
+    pub age_days: i64,
+    /// True if the top result's verification is beyond `Untested`
+    /// (i.e. at least `TestsPass`).
+    pub verified: bool,
+    /// Number of episodes returned in this retrieval.
+    pub episodes_matched: usize,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecallConfidence {
+    High,
+    Medium,
+    Low,
+    None,
+}
+
+impl RecallConfidence {
+    fn from_score_and_verification(score: f32, verified: bool) -> Self {
+        if score >= 0.75 && verified {
+            Self::High
+        } else if score >= 0.60 || (score >= 0.50 && verified) {
+            Self::Medium
+        } else if score >= 0.40 {
+            Self::Low
+        } else {
+            Self::None
+        }
+    }
+}
+
+/// Compute recall attribution from retrieval results. Pure function —
+/// no IO, no LLM call. Returns a `RecallAttribution` that the MCP
+/// handler appends as structured JSON.
+pub fn compute_recall_attribution(episodes: &[ScoredEpisode]) -> RecallAttribution {
+    if episodes.is_empty() {
+        return RecallAttribution {
+            v: 1,
+            available: false,
+            top_score: 0.0,
+            confidence: RecallConfidence::None,
+            top_summary: String::new(),
+            top_episode: String::new(),
+            age_days: 0,
+            verified: false,
+            episodes_matched: 0,
+        };
+    }
+    let top = &episodes[0];
+    let ep = &top.episode;
+    let verified = ep.outcome.verification.weight() > 0.30;
+    let age_days = (chrono::Utc::now() - ep.timestamp_start).num_days();
+    let summary = if !ep.intent.extracted_intent.is_empty() {
+        ep.intent.extracted_intent.chars().take(120).collect()
+    } else {
+        ep.intent.raw_prompt.chars().take(120).collect()
+    };
+    let confidence = RecallConfidence::from_score_and_verification(top.combined_score, verified);
+    RecallAttribution {
+        v: 1,
+        available: top.combined_score >= 0.40,
+        top_score: top.combined_score,
+        confidence,
+        top_summary: summary,
+        top_episode: ep.id[..8.min(ep.id.len())].to_string(),
+        age_days,
+        verified,
+        episodes_matched: episodes.len(),
+    }
+}
+
+/// Format the attribution as the line that gets appended to the MCP
+/// response. Returns `recall_attribution: {...}\n`.
+pub fn format_recall_attribution(attr: &RecallAttribution) -> String {
+    format!(
+        "recall_attribution: {}",
+        serde_json::to_string(attr).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
 /// Apply Maximal Marginal Relevance (MMR) for result diversity
 /// lambda: 0.0 = pure diversity, 1.0 = pure relevance
 pub fn apply_mmr(
@@ -762,7 +874,7 @@ pub fn text_overlap_similarity(a: &Episode, b: &Episode) -> f32 {
 mod tests {
     use super::*;
 
-    use crate::episode::{Claim, ClaimCategory, ValidityScope};
+    use crate::episode::{Claim, ClaimCategory, ValidityScope, VerificationState};
 
     fn mk_ep_with_scope(project: &str, scope: Option<ValidityScope>) -> Episode {
         let mut ep = Episode::new(project.to_string(), "test prompt".to_string());
@@ -1034,5 +1146,110 @@ mod tests {
                 "scores should strictly decrease for a single ranking"
             );
         }
+    }
+
+    // ===== Recall attribution tests =====
+
+    fn mk_scored(id: &str, combined: f32, verification: VerificationState) -> ScoredEpisode {
+        let mut ep = Episode::new("p".to_string(), format!("intent for {id}"));
+        ep.id = id.to_string();
+        ep.outcome.verification = verification;
+        ScoredEpisode {
+            episode: ep,
+            similarity_score: combined,
+            utility_score: 0.5,
+            combined_score: combined,
+        }
+    }
+
+    #[test]
+    fn recall_attribution_empty_results() {
+        let attr = compute_recall_attribution(&[]);
+        assert!(!attr.available);
+        assert_eq!(attr.episodes_matched, 0);
+        assert!(matches!(attr.confidence, RecallConfidence::None));
+    }
+
+    #[test]
+    fn recall_attribution_high_confidence_requires_verified() {
+        let results = vec![mk_scored(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            0.85,
+            VerificationState::Merged {
+                commit: "abc".into(),
+                at: chrono::Utc::now(),
+            },
+        )];
+        let attr = compute_recall_attribution(&results);
+        assert!(attr.available);
+        assert!(matches!(attr.confidence, RecallConfidence::High));
+        assert!(attr.verified);
+        assert_eq!(attr.top_episode, "abcdef12");
+        assert_eq!(attr.episodes_matched, 1);
+    }
+
+    #[test]
+    fn recall_attribution_high_score_but_untested_is_medium() {
+        let results = vec![mk_scored(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            0.80,
+            VerificationState::Untested,
+        )];
+        let attr = compute_recall_attribution(&results);
+        assert!(attr.available);
+        assert!(matches!(attr.confidence, RecallConfidence::Medium));
+        assert!(!attr.verified);
+    }
+
+    #[test]
+    fn recall_attribution_low_score_is_low_or_none() {
+        let results = vec![mk_scored(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            0.42,
+            VerificationState::Untested,
+        )];
+        let attr = compute_recall_attribution(&results);
+        assert!(attr.available);
+        assert!(matches!(attr.confidence, RecallConfidence::Low));
+
+        let results = vec![mk_scored(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            0.20,
+            VerificationState::Untested,
+        )];
+        let attr = compute_recall_attribution(&results);
+        assert!(!attr.available);
+        assert!(matches!(attr.confidence, RecallConfidence::None));
+    }
+
+    #[test]
+    fn recall_attribution_format_is_parseable() {
+        let results = vec![mk_scored(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            0.85,
+            VerificationState::Untested,
+        )];
+        let attr = compute_recall_attribution(&results);
+        let line = format_recall_attribution(&attr);
+        assert!(line.starts_with("recall_attribution: "));
+        let json_str = line.strip_prefix("recall_attribution: ").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["available"], true);
+        assert_eq!(parsed["top_episode"], "abcdef12");
+    }
+
+    #[test]
+    fn recall_attribution_top_summary_truncates() {
+        let mut ep = Episode::new("p".to_string(), "x".repeat(200));
+        ep.id = "abcdef12-xxxx".to_string();
+        let results = vec![ScoredEpisode {
+            episode: ep,
+            similarity_score: 0.9,
+            utility_score: 0.5,
+            combined_score: 0.9,
+        }];
+        let attr = compute_recall_attribution(&results);
+        assert!(attr.top_summary.len() <= 120);
     }
 }
