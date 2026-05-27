@@ -54,6 +54,15 @@ git2 = "0.19"
 # HTTP client (for LLM API calls)
 reqwest = { version = "0.12", features = ["json"] }
 
+# Vendored OpenSSL for cross-compilation (git2 → libgit2-sys needs it).
+# On native builds the system OpenSSL is used; vendored kicks in when
+# the system headers aren't available for the target arch.
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+[features]
+default = []
+vendored-openssl = ["openssl"]
+
 [dev-dependencies]
 tempfile = "3.14"
 tokio-test = "0.4"
