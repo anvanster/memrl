@@ -11,6 +11,15 @@
 #![allow(clippy::unnecessary_map_or)]
 #![allow(clippy::ptr_arg)]
 
+// glibc <2.32 shim: ONNX Runtime (via fastembed → ort) references
+// __libc_single_threaded which was added in glibc 2.32. SLES 15-SP4
+// ships glibc 2.31, so we provide a fallback. Harmless on newer glibc
+// and on non-Linux targets (the #[cfg] gates it).
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub static __libc_single_threaded: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 

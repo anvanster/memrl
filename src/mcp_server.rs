@@ -15,6 +15,12 @@
 #![allow(clippy::unnecessary_map_or)]
 #![allow(clippy::ptr_arg)]
 
+// glibc <2.32 shim — see main.rs for rationale.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+pub static __libc_single_threaded: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 use anyhow::Result;
 use std::io::{self, BufRead, Write};
 
