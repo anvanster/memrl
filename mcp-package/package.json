@@ -1,0 +1,30 @@
+{
+  "name": "@anvanster/tempera-mcp",
+  "version": "0.4.28",
+  "description": "Tempera MCP server — persistent episodic memory for AI coding assistants",
+  "author": "Andrey Vasilevsky <anvanster@gmail.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anvanster/tempera"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "memory",
+    "claude",
+    "ai",
+    "episodic-memory"
+  ],
+  "bin": {
+    "tempera-mcp": "bin/tempera-mcp.js"
+  },
+  "files": [
+    "bin/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

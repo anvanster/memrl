@@ -34,3 +34,13 @@ Thumbs.db
 
 # Eval baselines are local runtime artifacts; keep the directory via .gitkeep
 /evals/baselines/*.json
+# Built binaries + DLLs in mcp-package (platform-specific, not the .js launcher)
+mcp-package/bin/tempera-darwin-*
+mcp-package/bin/tempera-linux-*
+mcp-package/bin/tempera-win32-*
+mcp-package/bin/tempera-mcp-darwin-*
+mcp-package/bin/tempera-mcp-linux-*
+mcp-package/bin/tempera-mcp-win32-*
+mcp-package/bin/onnxruntime.dll
+mcp-package/*.tgz
+dist/

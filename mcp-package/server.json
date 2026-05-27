@@ -1,0 +1,31 @@
+{
+  "name": "tempera",
+  "version": "0.4.28",
+  "description": "Persistent episodic memory for AI coding assistants — 12 MCP tools for capture, retrieve, brief, dream cycle, self-improvement, and cross-project learning",
+  "publisher": {
+    "name": "Andrey Vasilevsky",
+    "url": "https://github.com/anvanster"
+  },
+  "sourceUrl": "https://github.com/anvanster/tempera",
+  "license": "Apache-2.0",
+  "runtime": "node",
+  "command": "npx",
+  "args": ["-y", "@anvanster/tempera-mcp"],
+  "capabilities": {
+    "tools": true
+  },
+  "tools": [
+    "tempera_retrieve",
+    "tempera_capture",
+    "tempera_feedback",
+    "tempera_status",
+    "tempera_stats",
+    "tempera_propagate",
+    "tempera_review",
+    "tempera_log_correction",
+    "tempera_log_should_have_asked",
+    "tempera_session_start",
+    "tempera_template",
+    "tempera_brief"
+  ]
+}
