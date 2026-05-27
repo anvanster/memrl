@@ -147,7 +147,7 @@ if [ "${1:-}" = "--publish" ]; then
   echo ""
   echo "Publishing to npmjs.com..."
   npm publish --access public
-  echo "✓ Published @anvanster/tempera-mcp@$PKG_VERSION"
+  echo "✓ Published @astudioplus/tempera-mcp@$PKG_VERSION"
 else
   echo ""
   echo "To publish: cd mcp-package && npm publish --access public"

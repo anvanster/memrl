@@ -1,5 +1,5 @@
 {
-  "name": "@anvanster/tempera-mcp",
+  "name": "@astudioplus/tempera-mcp",
   "version": "0.4.28",
   "description": "Tempera MCP server — persistent episodic memory for AI coding assistants",
   "author": "Andrey Vasilevsky <anvanster@gmail.com>",

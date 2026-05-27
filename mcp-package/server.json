@@ -10,7 +10,7 @@
   "license": "Apache-2.0",
   "runtime": "node",
   "command": "npx",
-  "args": ["-y", "@anvanster/tempera-mcp"],
+  "args": ["-y", "@astudioplus/tempera-mcp"],
   "capabilities": {
     "tools": true
   },
