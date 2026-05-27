@@ -1,307 +1,172 @@
 # Tempera Installation Guide
 
-Complete installation instructions for Tempera on Windows, macOS, and Linux.
+Install instructions for Tempera on Windows, macOS, and Linux. For day-to-day usage see [../README.md](../README.md); for the current architecture see [../PROGRESS.md](../PROGRESS.md).
 
 ## Table of Contents
 
-- [Windows Installation](#windows-installation)
-- [macOS Installation](#macos-installation)
-- [Linux Installation](#linux-installation)
-- [Build from Source](#build-from-source)
-- [Verification](#verification)
+- [Prerequisites](#prerequisites)
+- [Installation paths](#installation-paths)
+  - [Option A — `cargo install` (recommended for Rust users)](#option-a--cargo-install-recommended-for-rust-users)
+  - [Option B — Build from source](#option-b--build-from-source)
+  - [Option C — Pre-built binary](#option-c--pre-built-binary)
+- [Set up with Claude Code](#set-up-with-claude-code)
+- [First run](#first-run)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
+- [Uninstall](#uninstall)
 
 ---
 
-## Windows Installation
+## Prerequisites
 
-### Option 1: Download Pre-built Binary (Recommended)
+Tempera has no external runtime dependencies beyond the embedding model it downloads on first use. The build-time prerequisites depend on which install path you take:
 
-#### Step 1: Download Release Package
+| Path | Needs |
+|------|-------|
+| `cargo install` | Rust toolchain ([rustup.rs](https://rustup.rs/)). 1-2 GB of disk and ~5 min for the first build. |
+| Build from source | Same as above, plus a git checkout. |
+| Pre-built binary | Nothing — just `unzip`/`tar`. |
 
-1. Go to the [Tempera Releases page](https://github.com/anvanster/tempera/releases)
-2. Download the latest `tempera-vX.X.X-windows-x64.zip` file
-3. Download the corresponding `.sha256` checksum file (optional, for verification)
+**Note**: Tempera does **not** require `protoc`, LanceDB, or any other external binary. Earlier releases (pre-v0.4.x) needed protoc for LanceDB; the current build uses [vectrust](https://crates.io/crates/vectrust) which builds without it.
 
-#### Step 2: Verify Checksum (Optional but Recommended)
+Network access is needed once on first run to download the [BGE-Small](https://huggingface.co/BAAI/bge-small-en-v1.5) embedding model (~128 MB) from HuggingFace. The model is cached locally afterward and Tempera works offline.
 
-Open PowerShell and run:
+---
 
-```powershell
-# Navigate to your downloads folder
-cd $env:USERPROFILE\Downloads
+## Installation paths
 
-# Verify the checksum
-$hash = (Get-FileHash -Path "tempera-v0.1.3-windows-x64.zip" -Algorithm SHA256).Hash
-$expected = (Get-Content "tempera-v0.1.3-windows-x64.sha256" -Raw).Split()[0]
+### Option A — `cargo install` (recommended for Rust users)
 
-if ($hash -eq $expected) {
-    Write-Host "✅ Checksum verified!" -ForegroundColor Green
-} else {
-    Write-Host "❌ Checksum mismatch!" -ForegroundColor Red
-}
+```bash
+cargo install tempera
 ```
 
-#### Step 3: Extract Archive
+This builds both binaries (`tempera` and `tempera-mcp`) and installs them into your Cargo bin directory:
 
-```powershell
-# Extract to Program Files
-Expand-Archive -Path "tempera-v0.1.3-windows-x64.zip" -DestinationPath "$env:ProgramFiles\tempera"
+- **Linux/macOS**: `~/.cargo/bin/`
+- **Windows**: `%USERPROFILE%\.cargo\bin\`
 
-# Or extract to a user directory
-Expand-Archive -Path "tempera-v0.1.3-windows-x64.zip" -DestinationPath "$env:LOCALAPPDATA\tempera"
+`~/.cargo/bin` is on PATH by default after running `rustup`. If not, add it manually.
+
+### Option B — Build from source
+
+```bash
+git clone https://github.com/anvanster/tempera.git
+cd tempera
+cargo build --release
 ```
 
-#### Step 4: Add to PATH
+Both binaries land in `target/release/`:
 
-##### Using PowerShell (Temporary - Current Session Only):
-
-```powershell
-$env:Path += ";$env:LOCALAPPDATA\tempera"
+```
+target/release/tempera         # CLI
+target/release/tempera-mcp     # MCP server for Claude Code
 ```
 
-##### Using PowerShell (Permanent - Recommended):
+Copy them somewhere on PATH:
+
+```bash
+# Linux/macOS
+sudo cp target/release/{tempera,tempera-mcp} /usr/local/bin/
+
+# macOS without sudo (using ~/.local/bin if it's on PATH)
+mkdir -p ~/.local/bin
+cp target/release/{tempera,tempera-mcp} ~/.local/bin/
+
+# Windows (PowerShell)
+New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\tempera"
+Copy-Item target\release\tempera.exe,target\release\tempera-mcp.exe "$env:LOCALAPPDATA\tempera\"
+# Add $env:LOCALAPPDATA\tempera to PATH — see step under Option C below.
+```
+
+The release build uses LTO + strip — slow (~5 minutes), but the resulting binaries are smaller and faster.
+
+### Option C — Pre-built binary
+
+Releases are published at [github.com/anvanster/tempera/releases](https://github.com/anvanster/tempera/releases). Each release ships archives named by Rust target triple:
+
+| Platform | Asset |
+|----------|-------|
+| Intel/AMD Linux | `tempera-x86_64-unknown-linux-gnu.tar.gz` |
+| ARM64 Linux | `tempera-aarch64-unknown-linux-gnu.tar.gz` |
+| Intel macOS | `tempera-x86_64-apple-darwin.tar.gz` |
+| Apple Silicon macOS | `tempera-aarch64-apple-darwin.tar.gz` |
+| Windows | `tempera-x86_64-pc-windows-msvc.zip` |
+
+#### Linux / macOS
+
+```bash
+# Pick the right archive for your platform.
+TAG=$(curl -s https://api.github.com/repos/anvanster/tempera/releases/latest | jq -r .tag_name)
+TARGET=x86_64-unknown-linux-gnu   # or aarch64-apple-darwin, etc.
+
+curl -LO "https://github.com/anvanster/tempera/releases/download/${TAG}/tempera-${TARGET}.tar.gz"
+tar -xzf "tempera-${TARGET}.tar.gz"
+
+# Install
+sudo mv tempera tempera-mcp /usr/local/bin/
+sudo chmod +x /usr/local/bin/tempera /usr/local/bin/tempera-mcp
+```
+
+#### Windows (PowerShell)
 
 ```powershell
-# Add to user PATH
+# Download the latest release archive (replace v0.4.27 with the actual tag).
+$tag = "v0.4.27"
+$url = "https://github.com/anvanster/tempera/releases/download/$tag/tempera-x86_64-pc-windows-msvc.zip"
+Invoke-WebRequest -Uri $url -OutFile "$env:USERPROFILE\Downloads\tempera.zip"
+
+# Extract
+Expand-Archive -Path "$env:USERPROFILE\Downloads\tempera.zip" -DestinationPath "$env:LOCALAPPDATA\tempera" -Force
+
+# Add to user PATH (permanent)
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-[Environment]::SetEnvironmentVariable("Path", "$userPath;$env:LOCALAPPDATA\tempera", "User")
+if ($userPath -notlike "*$env:LOCALAPPDATA\tempera*") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$env:LOCALAPPDATA\tempera", "User")
+}
 
-# Refresh current session
+# Refresh PATH in current session
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 ```
 
-##### Using GUI:
-
-1. Press `Win + X` and select "System"
-2. Click "Advanced system settings"
-3. Click "Environment Variables"
-4. Under "User variables", select "Path" and click "Edit"
-5. Click "New" and add: `C:\Users\YourUsername\AppData\Local\tempera`
-6. Click "OK" on all dialogs
-7. Restart your terminal
-
-#### Step 5: Verify Installation
-
-Open a new PowerShell or Command Prompt window:
-
-```powershell
-# Check tempera CLI
-tempera --version
-
-# Check MCP server
-tempera-mcp --version
-```
-
-You should see version information for both executables.
-
----
-
-### Option 2: Install from crates.io
-
-If you have Rust installed:
-
-```powershell
-cargo install tempera
-```
-
-This compiles from source and installs both `tempera.exe` and `tempera-mcp.exe` to your Cargo bin directory (usually `C:\Users\YourUsername\.cargo\bin`).
-
----
-
-## macOS Installation
-
-### Option 1: Download Pre-built Binary
-
-#### Step 1: Download and Extract
-
-```bash
-# Download the latest release
-cd ~/Downloads
-curl -LO https://github.com/anvanster/tempera/releases/download/v0.1.3/tempera-v0.1.3-macos-x64.zip
-curl -LO https://github.com/anvanster/tempera/releases/download/v0.1.3/tempera-v0.1.3-macos-x64.sha256
-
-# Verify checksum
-shasum -a 256 -c tempera-v0.1.3-macos-x64.sha256
-
-# Extract
-unzip tempera-v0.1.3-macos-x64.zip -d tempera
-```
-
-#### Step 2: Install
-
-```bash
-# Move to local bin
-sudo mv tempera/tempera /usr/local/bin/
-sudo mv tempera/tempera-mcp /usr/local/bin/
-
-# Make executable
-sudo chmod +x /usr/local/bin/tempera
-sudo chmod +x /usr/local/bin/tempera-mcp
-```
-
-#### Step 3: Verify
+#### Verify
 
 ```bash
 tempera --version
 tempera-mcp --version
 ```
 
-### Option 2: Install from crates.io
-
-```bash
-cargo install tempera
-```
+Both should print the same version (matches `Cargo.toml`).
 
 ---
 
-## Linux Installation
+## Set up with Claude Code
 
-### Option 1: Download Pre-built Binary
+Tempera is consumed by Claude Code as an MCP server. The `tempera-mcp` binary speaks the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio.
 
-#### Step 1: Download and Extract
+### Recommended: `claude mcp add`
 
-```bash
-# Download the latest release
-cd ~/Downloads
-wget https://github.com/anvanster/tempera/releases/download/v0.1.3/tempera-v0.1.3-linux-x64.zip
-wget https://github.com/anvanster/tempera/releases/download/v0.1.3/tempera-v0.1.3-linux-x64.sha256
-
-# Verify checksum
-sha256sum -c tempera-v0.1.3-linux-x64.sha256
-
-# Extract
-unzip tempera-v0.1.3-linux-x64.zip -d tempera
-```
-
-#### Step 2: Install
+The simplest path is to register the server with the Claude CLI:
 
 ```bash
-# Move to local bin
-sudo mv tempera/tempera /usr/local/bin/
-sudo mv tempera/tempera-mcp /usr/local/bin/
+# User-scoped (available across all your projects).
+claude mcp add tempera --scope user -- $(which tempera-mcp)
 
-# Make executable
-sudo chmod +x /usr/local/bin/tempera
-sudo chmod +x /usr/local/bin/tempera-mcp
+# Or with an explicit path:
+claude mcp add tempera --scope user -- /usr/local/bin/tempera-mcp
 ```
 
-#### Step 3: Verify
+Restart Claude Code, then run `/mcp` inside Claude Code. You should see `tempera` listed with 12 tools.
 
-```bash
-tempera --version
-tempera-mcp --version
-```
+### Alternative: VS Code mcp.json
 
-### Option 2: Install from crates.io
-
-```bash
-cargo install tempera
-```
-
----
-
-## Build from Source
-
-### Prerequisites
-
-- **Rust**: Install from [rustup.rs](https://rustup.rs/)
-  - Windows: Download and run `rustup-init.exe`
-  - macOS/Linux: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-
-- **Protocol Buffers Compiler (protoc)**: Required by LanceDB dependencies
-
-  **Windows:**
-  1. Download [protoc-34.0-rc-1-win64.zip](https://github.com/protocolbuffers/protobuf/releases/download/v34.0-rc1.1/protoc-34.0-rc-1-win64.zip)
-  2. Extract to a directory (e.g., `C:\tools\protoc`)
-  3. Set the environment variable:
-     ```powershell
-     $env:PROTOC = "C:\tools\protoc\bin\protoc.exe"
-     ```
-
-  **Linux:**
-  ```bash
-  # Download and extract protoc
-  wget https://github.com/protocolbuffers/protobuf/releases/download/v34.0-rc1.1/protoc-34.0-rc-1-linux-x86_64.zip
-  unzip protoc-34.0-rc-1-linux-x86_64.zip -d protoc
-
-  # Add to bashrc for persistence
-  echo "export PROTOC=$(pwd)/protoc/bin/protoc" >> ~/.bashrc
-  source ~/.bashrc
-  ```
-
-### Build Steps
-
-```bash
-# Clone repository
-git clone https://github.com/anvanster/tempera.git
-cd tempera
-
-# Build release binaries
-cargo build --release
-
-# Binaries are created in:
-# - target/release/tempera      (CLI tool)
-# - target/release/tempera-mcp  (MCP server)
-```
-
-### Install Built Binaries
-
-**Windows:**
-```powershell
-# Copy to local bin directory
-New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\tempera"
-Copy-Item target\release\tempera.exe "$env:LOCALAPPDATA\tempera\"
-Copy-Item target\release\tempera-mcp.exe "$env:LOCALAPPDATA\tempera\"
-
-# Add to PATH (see Windows installation steps above)
-```
-
-**macOS/Linux:**
-```bash
-sudo cp target/release/tempera /usr/local/bin/
-sudo cp target/release/tempera-mcp /usr/local/bin/
-```
-
----
-
-## Verification
-
-### Test CLI Tool
-
-```bash
-# Check version
-tempera --version
-
-# View help
-tempera --help
-
-# Check memory status
-tempera status
-```
-
-### Test MCP Server
-
-```bash
-# Check version
-tempera-mcp --version
-```
-
----
-
-## Configuration
-
-### Configure Claude Desktop (VS Code)
-
-1. Open your VS Code workspace
-2. Create or edit `.vscode/mcp.json`:
+If you want project-scoped configuration instead of user-scoped, create or edit `.vscode/mcp.json` in your project:
 
 ```json
 {
   "servers": {
     "tempera": {
-      "command": "C:\\Users\\YourUsername\\AppData\\Local\\tempera\\tempera-mcp.exe",
+      "command": "/usr/local/bin/tempera-mcp",
       "args": [],
       "env": {}
     }
@@ -309,148 +174,213 @@ tempera-mcp --version
 }
 ```
 
-**Important**: Replace `C:\\Users\\YourUsername\\AppData\\Local\\tempera\\tempera-mcp.exe` with the actual path where you installed tempera-mcp.exe.
+On Windows the `command` looks like `"C:\\Users\\You\\AppData\\Local\\tempera\\tempera-mcp.exe"` (note the doubled backslashes — required by JSON).
 
-To find the exact path:
-
-```powershell
-# Windows
-(Get-Command tempera-mcp).Source
-
-# macOS/Linux
-which tempera-mcp
-```
-
-3. Restart VS Code
-4. The tempera MCP server will be available to Claude Code
-
-### First Run - Model Download
-
-The first time you use tempera, it will download the embedding model (~90MB):
+Find the exact path Tempera installed to:
 
 ```bash
-tempera status
+# Linux/macOS
+which tempera-mcp
+
+# Windows (PowerShell)
+(Get-Command tempera-mcp).Source
 ```
 
-Output:
+Restart VS Code to load the configuration.
+
+---
+
+## First run
+
+The first time `tempera-mcp` (or any retrieval/index command) runs, Tempera downloads the BGE-Small embedding model (~128 MB) from HuggingFace. This is a one-time cost:
+
+```bash
+# Trigger the download manually from the CLI:
+tempera init
+# 🔄 Loading embedding model (this may download the model on first run)...
+# ✅ Embedding model loaded
 ```
-🔄 Downloading embedding model (one-time, ~90MB)...
-✅ Model downloaded successfully
-📊 Memory Status for 'your-project'
-...
+
+The model — and everything else Tempera persists — is cached under a single directory:
+
+| OS | Path |
+|----|------|
+| Linux / macOS | `~/.tempera/` |
+| Windows | `%USERPROFILE%\.tempera\` |
+
+Layout after first run:
+
+```
+~/.tempera/
+├── config.toml         # Configuration (auto-created with defaults)
+├── episodes/           # Canonical JSON per captured session
+├── jobs.sqlite         # SQLite for everything indexable (11 tables)
+├── vectors/            # vectrust embedding index
+├── models/             # BGE-Small model files (~128 MB)
+├── reflections/        # Daily reflection markdown (v0.7.3+)
+├── patterns/           # Cross-day pattern pages (v0.7.4+)
+└── templates/          # Reasoning templates (v0.8.3+)
 ```
 
-The model is cached in:
-- **Windows**: `C:\Users\YourUsername\.cache\tempera\`
-- **macOS**: `~/Library/Caches/tempera/`
-- **Linux**: `~/.cache/tempera/`
+Override the data directory with the `TEMPERA_DATA_DIR` environment variable; override the model cache with `FASTEMBED_CACHE_DIR`.
 
-### Optional: Custom Configuration
+---
 
-Create `~/.tempera/config.toml` to customize settings:
+## Configuration
+
+All knobs live in `~/.tempera/config.toml`. Defaults are tuned to be useful out of the box — you only need to touch the file if you want to change retrieval ranking, dream-cycle behaviour, or per-phase budgets.
+
+See the [Configuration section in the README](../README.md#configuration) for the full reference. A minimal example to override the dream-cycle budget:
 
 ```toml
-# Memory settings
-max_episodes = 10000
-retrieval_limit = 10
-
-# Utility parameters
-learning_rate = 0.3
-discount_factor = 0.95
-decay_rate = 0.01
-
-# Vector search
-vector_enabled = true
-similarity_threshold = 0.7
+[dream]
+default_max_usd = 1.00       # Default is 0.50
+templates_min_evidence = 5   # Default is 3 — require denser evidence per template
 ```
 
 ---
 
 ## Troubleshooting
 
-### Windows: "Command not found"
+### `tempera --version` reports "command not found"
 
-**Problem**: PowerShell doesn't recognize `tempera` command.
+PATH isn't set up. Check where the binary actually landed:
 
-**Solutions**:
-1. Verify PATH was updated: `$env:Path -split ';' | Select-String tempera`
-2. Restart your terminal completely
-3. Try using the full path: `C:\Users\YourUsername\AppData\Local\tempera\tempera.exe --version`
+```bash
+# cargo install
+ls ~/.cargo/bin/tempera*
 
-### Windows: "Cannot be loaded because running scripts is disabled"
+# Source build
+ls target/release/tempera*
 
-**Problem**: PowerShell execution policy blocks scripts.
+# Pre-built binary, Linux/macOS
+ls /usr/local/bin/tempera*
 
-**Solution**:
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+# Pre-built binary, Windows
+Get-ChildItem "$env:LOCALAPPDATA\tempera\"
 ```
 
-### Windows: Antivirus Blocks Executable
+Then make sure the containing directory is on PATH. On Linux/macOS, add to `~/.bashrc` or `~/.zshrc`:
 
-**Problem**: Windows Defender or antivirus quarantines tempera.exe.
-
-**Solution**:
-1. Add tempera installation directory to antivirus exclusions
-2. Or build from source yourself (antivirus trusts self-built binaries)
-
-### macOS: "Cannot be opened because the developer cannot be verified"
-
-**Problem**: macOS Gatekeeper blocks unsigned binary.
-
-**Solution**:
 ```bash
-# Remove quarantine attribute
+export PATH="$HOME/.cargo/bin:$PATH"   # or wherever tempera lives
+```
+
+### MCP server doesn't appear in Claude Code
+
+1. **Verify the path** — Claude Code can't auto-detect the binary. Check what's registered:
+   ```bash
+   claude mcp list
+   ```
+   If `tempera-mcp` isn't there or points to the wrong path, re-add it.
+
+2. **Restart Claude Code completely** — closing and reopening the VS Code panel isn't enough; the CLI needs a fresh start to load MCP servers.
+
+3. **Check for errors** — in VS Code, open the developer tools (`Help → Toggle Developer Tools`) and look for errors mentioning "tempera" in the console.
+
+4. **Test the binary directly** — `tempera-mcp` is interactive, but launching it should produce no output (it waits on stdin):
+   ```bash
+   echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | tempera-mcp
+   ```
+   Expect a JSON response listing 12 tools.
+
+### Embedding model download fails
+
+The download requires HTTPS access to `huggingface.co`. If you're behind a corporate proxy, set `HTTPS_PROXY` and `HTTP_PROXY` before invoking Tempera:
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:8080
+export HTTP_PROXY=http://proxy.example.com:8080
+tempera init
+```
+
+If the download succeeded once and you want to share the model between machines, copy the entire `~/.tempera/models/` directory.
+
+### `tempera retrieve` finds nothing despite captures
+
+The vector index may be empty or out of date. Re-index everything:
+
+```bash
+tempera index --reindex
+```
+
+Then verify:
+
+```bash
+tempera status
+# Look for "Vector index: N episodes" — should match capture count.
+```
+
+### `tempera_brief` returns "nothing to surface"
+
+Normal early on — the brief joins against signal data (mistakes, asks, templates, calibration) that accrues over time. See the [README troubleshooting section](../README.md#troubleshooting) for the per-section gates.
+
+### `tempera retrieve --cross-project` returns nothing
+
+Episodes captured before v0.6.4 don't have an explicit `ValidityScope`, so v0.10's cross-project filter treats them as project-bound (conservative default). To enable cross-project surfacing for an existing capture, re-capture with `validity_scope` set (e.g. `language:rust`) or wait for the LLM-suggested scope from new v0.10.3+ captures to accrue.
+
+### macOS: "cannot be opened because the developer cannot be verified"
+
+The pre-built binaries aren't notarized. Either:
+
+```bash
+# Remove the quarantine attribute (per-binary)
 xattr -d com.apple.quarantine /usr/local/bin/tempera
 xattr -d com.apple.quarantine /usr/local/bin/tempera-mcp
 ```
 
-### All Platforms: "Error: Failed to initialize database"
+Or build from source — Apple's Gatekeeper trusts locally-compiled binaries.
 
-**Problem**: SQLite database initialization failed.
+### Windows: PowerShell blocks the binary
 
-**Solution**:
+Add the install directory to Windows Defender exclusions (Settings → Update & Security → Virus & Threat Protection → Add an exclusion → Folder), or build from source.
+
+### Database errors at startup
+
+If `jobs.sqlite` got corrupted, the cleanest recovery is to snapshot the data dir, delete the SQLite file, and let Tempera recreate it. Episodes themselves live in `~/.tempera/episodes/` as JSON; they re-populate the SQLite tables when you next call any indexing command.
+
 ```bash
-# Check if tempera data directory exists
-# Windows: %APPDATA%\tempera\
-# macOS/Linux: ~/.tempera/
+# Back up first
+tempera backup
 
-# If corrupted, delete and reinitialize
-rm -rf ~/.tempera/episodes.db
+# Then remove the SQLite store
+rm ~/.tempera/jobs.sqlite
+
+# Re-create on next call (which also re-runs migrations)
 tempera status
+tempera index --reindex
 ```
-
-### Build Error: "protoc not found" or "PROTOC environment variable not set"
-
-**Problem**: Building from source fails because protoc is missing.
-
-**Solution**: See [Prerequisites](#prerequisites) section for protoc installation instructions.
-
-### MCP Server Not Appearing in Claude Code
-
-**Problem**: Claude Code doesn't show tempera tools.
-
-**Solutions**:
-1. Verify `.vscode/mcp.json` syntax is valid JSON
-2. Check the path to `tempera-mcp.exe` is correct
-3. Restart VS Code completely
-4. Check VS Code Developer Console for errors: `Help > Toggle Developer Tools`
 
 ---
 
-## Next Steps
+## Uninstall
 
-After installation:
+Tempera leaves nothing outside `~/.tempera/` and the binaries themselves. To remove cleanly:
 
-1. **Read the README**: [README.md](../README.md) for usage examples
-2. **View CLI help**: `tempera --help`
-3. **Check memory status**: `tempera status`
-4. **Start using with Claude**: Ask Claude to capture your first episode!
+```bash
+# Delete the binaries
+# (cargo install)
+cargo uninstall tempera
+
+# (source/pre-built install on Linux/macOS)
+sudo rm /usr/local/bin/tempera /usr/local/bin/tempera-mcp
+
+# (Windows)
+Remove-Item "$env:LOCALAPPDATA\tempera" -Recurse -Force
+
+# Remove the MCP registration
+claude mcp remove tempera
+
+# Optionally, wipe the data dir (this deletes ALL captured memory)
+rm -rf ~/.tempera/
+```
+
+Back up `~/.tempera/episodes/` first if you want to keep your memory.
 
 ---
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/anvanster/tempera/issues)
+- **Issues**: [github.com/anvanster/tempera/issues](https://github.com/anvanster/tempera/issues)
 - **Repository**: [github.com/anvanster/tempera](https://github.com/anvanster/tempera)
 - **License**: Apache-2.0
