@@ -24,6 +24,7 @@
     "bin/",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "server.json"
   ],
   "engines": {

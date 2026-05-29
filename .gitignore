@@ -43,4 +43,8 @@ mcp-package/bin/tempera-mcp-linux-*
 mcp-package/bin/tempera-mcp-win32-*
 mcp-package/bin/onnxruntime.dll
 mcp-package/*.tgz
+# Synced copies of root docs (package-mcp.sh copies them at pack time)
+mcp-package/README.md
+mcp-package/LICENSE
+mcp-package/NOTICE
 dist/

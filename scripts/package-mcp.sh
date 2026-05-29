@@ -116,6 +116,19 @@ if [ ! -f "$BIN_DIR/tempera-mcp.js" ]; then
 fi
 chmod +x "$BIN_DIR/tempera-mcp.js"
 
+# ── Step 4b: Copy docs (README/LICENSE/NOTICE) so npmjs renders them ──
+# npm only includes files that exist in the package dir at pack time.
+# The canonical copies live at the repo root; sync them here.
+
+for doc in README.md LICENSE NOTICE; do
+  if [ -f "$REPO_ROOT/$doc" ]; then
+    cp "$REPO_ROOT/$doc" "$PKG_DIR/$doc"
+    echo "  ✓ Copied $doc"
+  else
+    echo "  ⚠ WARNING: $REPO_ROOT/$doc not found — npmjs page may be missing it"
+  fi
+done
+
 # ── Step 5: Show package contents ────────────────────────────────────
 
 echo ""
